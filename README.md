@@ -5,7 +5,7 @@ This repository contains my personal homeserver configuration using Docker Compo
 ## Repository Structure
 
 ```
-/
+/homelab/
 ├── services/
 │   ├── nextcloud/
 │   │   ├── docker-compose.yml
