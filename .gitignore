@@ -1,34 +1,22 @@
-# Nextcloud data (bind‑mounted volumes)
-services/nextcloud/nextcloud/
+# Ignore local environment overrides, but keep templates
+*.env
+!*.env.template
+
+# Ignore service-specific .env files
+services/*/.env
+
+# Ignore Docker volumes directories created by compose for each service
 services/nextcloud/db/
-
-# Vaultwarden data
+services/nextcloud/nextcloud/
 services/vaultwarden/vw-data/
-
-# Zoraxy config & plugin folders
 services/zoraxy/config/
 services/zoraxy/plugin/
 
-# Environment files
-**/.env
-**/.env.local
-**/.env.*.local
-services/**/.env
-
-# Docker override (if used)
-/docker-compose.override.yml
-
-# OS files
+# Ignore OS and editor clutter
 .DS_Store
-localtime
-
-# Editor / IDE
+Thumbs.db
 .vscode/
 .idea/
-*.sublime-workspace
-*.sublime-project
-
-# Backup / swap
-*~
-*.bak
 *.swp
+*~
+*.log
