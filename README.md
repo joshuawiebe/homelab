@@ -15,7 +15,7 @@ All services run in a shared Docker network called `proxy`, so no ports need to 
 │   ├── start.sh       # Starts all services automatically
 │   └── stop.sh        # Stops all services automatically
 ├── services/
-│   ├── adguard\_home/
+│   ├── adguard_home/
 │   │   └── docker-compose.yml
 │   ├── gotify/
 │   │   └── docker-compose.yml
@@ -25,7 +25,7 @@ All services run in a shared Docker network called `proxy`, so no ports need to 
 │   ├── nextcloud/
 │   │   ├── .env.template
 │   │   └── docker-compose.yml
-│   ├── uptime\_kuma/
+│   ├── uptime_kuma/
 │   │   └── docker-compose.yml
 │   ├── vaultwarden/
 │   │   ├── .env.template
