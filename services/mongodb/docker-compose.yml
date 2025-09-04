@@ -1,0 +1,16 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    restart: unless-stopped
+    networks:
+      - proxy
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=joshuawiebe
+      - MONGO_INITDB_ROOT_PASSWORD=${PASSWORD}
+    volumes:
+      - ./data:/data/db
+
+networks:
+  proxy:
+    external: true

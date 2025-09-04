@@ -1,0 +1,16 @@
+services:
+  adguard_home:
+    image: adguard/adguardhome:latest
+    container_name: adguard_home
+    restart: unless-stopped
+    volumes:
+      - ./work:/opt/adguardhome/work
+      - ./conf:/opt/adguardhome/conf
+    environment:
+      - TZ=Europe/Berlin
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

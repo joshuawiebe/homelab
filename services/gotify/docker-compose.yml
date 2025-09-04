@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  gotify:
+    image: gotify/server:latest
+    container_name: gotify
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Europe/Berlin
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
