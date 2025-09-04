@@ -1,47 +1,81 @@
 #!/bin/bash
 set -e
 
+# HomeLab Services
 SERVICES=("adguard_home" "gotify" "mongodb" "nextcloud" "uptime_kuma" "vaultwarden" "watchtower" "zoraxy")
+ROOT_DIR="$(pwd)"
+NETWORK_NAME="proxy"
 
-echo "Setup homelab..."
-read -p "Generate one master password automatically? (y/n): " AUTO_PASS
+echo "=========================="
+echo " HomeLab Configuration"
+echo "=========================="
 
-MASTER_PASS=""
-
-if [ "$AUTO_PASS" = "y" ]; then
-  MASTER_PASS=$(openssl rand -base64 24)
-  echo "Generated Master Password: $MASTER_PASS"
+# Create Docker network if it doesn't exist
+if ! docker network inspect $NETWORK_NAME >/dev/null 2>&1; then
+  echo "Creating Docker network: $NETWORK_NAME"
+  docker network create $NETWORK_NAME
 else
-  read -sp "Enter master password: " MASTER_PASS
-  echo
+  echo "Docker network '$NETWORK_NAME' already exists."
 fi
 
-for SERVICE in "${SERVICES[@]}"; do
-  cd services/$SERVICE
+# Ask user if passwords should be auto-generated
+read -p "Generate passwords automatically for services that need them? [Y/n]: " AUTO_PASS
+AUTO_PASS=${AUTO_PASS:-Y}
 
+# Generate one master password for hashing Vaultwarden
+if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
+  MASTER_PASS=$(openssl rand -base64 24)
+  echo "Generated master password for Vaultwarden hashing."
+else
+  echo "You will need to manually fill passwords in .env files for each service."
+fi
+
+# Iterate through all services
+for SERVICE in "${SERVICES[@]}"; do
+  SERVICE_DIR="$ROOT_DIR/services/$SERVICE"
+  cd "$SERVICE_DIR"
+
+  # Copy .env.template to .env if not exists
   if [ ! -f .env ]; then
-    cp .env.template .env
+    if [ -f .env.template ]; then
+      cp .env.template .env
+      echo "Created .env for $SERVICE"
+    fi
   fi
 
-  case $SERVICE in
-    vaultwarden)
-      HASH=$(docker run --rm vaultwarden/server /vaultwarden hash "$MASTER_PASS" | tail -n 1)
-      sed -i "s|ADMIN_TOKEN=.*|ADMIN_TOKEN=$HASH|" .env
-      ;;
-    mongodb|gotify|nextcloud)
-      sed -i "s|PASSWORD=.*|PASSWORD=$MASTER_PASS|" .env
-      ;;
-    adguard_home|uptime_kuma|watchtower|zoraxy)
-      # no password needed
-      ;;
-  esac
+  # Auto-generate passwords
+  if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
+    case $SERVICE in
+      vaultwarden)
+        # Vaultwarden requires hashing via Docker
+        HASH=$(docker run --rm -i vaultwarden/server /vaultwarden hash <<<"$MASTER_PASS"$'\n'"$MASTER_PASS")
+        sed -i "s|ADMIN_TOKEN=.*|ADMIN_TOKEN=$HASH|" .env
+        echo "Set Vaultwarden ADMIN_TOKEN (hashed) in .env"
+        ;;
+      mongodb|nextcloud)
+        DB_PASS=$(openssl rand -base64 24)
+        sed -i "s|MYSQL_PASSWORD=.*|MYSQL_PASSWORD=$DB_PASS|" .env || true
+        sed -i "s|MYSQL_ROOT_PASSWORD=.*|MYSQL_ROOT_PASSWORD=$DB_PASS|" .env || true
+        echo "Set database password for $SERVICE in .env"
+        ;;
+      gotify)
+        GOTIFY_PASS=$(openssl rand -base64 24)
+        sed -i "s|GOTIFY_ADMIN_PASSWORD=.*|GOTIFY_ADMIN_PASSWORD=$GOTIFY_PASS|" .env || true
+        echo "Set Gotify admin password in .env"
+        ;;
+    esac
+  fi
 
-  cd ../..
+  cd "$ROOT_DIR"
 done
 
-if [ "$AUTO_PASS" = "y" ]; then
-  read -p "Start services automatically? (y/n): " AUTOSTART
-  if [ "$AUTOSTART" = "y" ]; then
-    ./start.sh
+# Ask if services should start automatically
+if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
+  read -p "Start all services now? [Y/n]: " AUTOSTART
+  AUTOSTART=${AUTOSTART:-Y}
+  if [[ "$AUTOSTART" =~ ^[Yy]$ ]]; then
+    bash ./.automations/start.sh
   fi
 fi
+
+echo "Configuration complete."
