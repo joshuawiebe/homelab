@@ -1,4 +1,4 @@
-# HomeLab — Dockerized Personal Server Setup
+# HomeLab - Dockerized Personal Server Setup
 
 This repository contains my personal home server setup using **Docker Compose**. Every service is organized in its own folder under `services/`, with individual `docker-compose.yml` and `.env.template` files.
 
@@ -8,7 +8,7 @@ All services run in a shared Docker network called `proxy`, so no ports need to 
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/ferristhiel/homelab.git
+   git clone https://github.com/joshuawiebe/homelab.git
    cd homelab
    ```
 
