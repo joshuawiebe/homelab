@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - DOMAIN=${DOMAIN}
     volumes:
       - ./vw-data:/data/
     networks:

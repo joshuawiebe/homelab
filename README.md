@@ -4,6 +4,29 @@ This repository contains my personal home server setup using **Docker Compose**.
 
 All services run in a shared Docker network called `proxy`, so no ports need to be forwarded externally. Routing and TLS are handled via Zoraxy.
 
+## Quick Start
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/ferristhiel/homelab.git
+   cd homelab
+   ```
+
+2. Run the configuration script:
+   ```bash
+   ./.automations/config.sh
+   ```
+
+3. Start all services:
+   ```bash
+   ./.automations/start.sh
+   ```
+
+4. To stop all services:
+   ```bash
+   ./.automations/stop.sh
+   ```
+
 ---
 
 ## Repository Structure
@@ -11,30 +34,40 @@ All services run in a shared Docker network called `proxy`, so no ports need to 
 ```
 /homelab/
 ├── .automations/
-│   ├── config.sh      # Sets up .env files, optionally generates passwords, can start services
-│   ├── start.sh       # Starts all services automatically
-│   └── stop.sh        # Stops all services automatically
+│   ├── config.sh      # Sets up .env files, optionally generates passwords
+│   ├── start.sh       # Starts all services in correct order
+│   └── stop.sh        # Stops all services in reverse order
 ├── services/
-│   ├── adguard_home/
-│   │   └── docker-compose.yml
-│   ├── gotify/
-│   │   └── docker-compose.yml
-│   ├── mongodb/
+│   ├── adguard_home/  # Network-wide ad blocking
+│   │   ├── docker-compose.yml
+│   │   ├── conf/      # AdGuard configuration
+│   │   └── work/      # AdGuard working directory
+│   ├── gotify/        # Push notification server
+│   │   ├── docker-compose.yml
+│   │   └── data/      # Application data and plugins
+│   ├── mongodb/       # Database backend
 │   │   ├── .env.template
-│   │   └── docker-compose.yml
-│   ├── nextcloud/
+│   │   ├── docker-compose.yml
+│   │   └── data/      # Database files
+│   ├── nextcloud/     # Personal cloud storage
 │   │   ├── .env.template
-│   │   └── docker-compose.yml
-│   ├── uptime_kuma/
-│   │   └── docker-compose.yml
-│   ├── vaultwarden/
+│   │   ├── docker-compose.yml
+│   │   ├── db/        # MariaDB database
+│   │   └── nextcloud/ # Nextcloud data
+│   ├── uptime_kuma/   # Uptime monitoring
+│   │   ├── docker-compose.yml
+│   │   └── data/      # Monitor data and screenshots
+│   ├── vaultwarden/   # Password manager
 │   │   ├── .env.template
+│   │   ├── docker-compose.yml
+│   │   └── vw-data/   # Encrypted vault data
+│   ├── watchtower/    # Automatic container updates
 │   │   └── docker-compose.yml
-│   ├── watchtower/
-│   │   └── docker-compose.yml
-│   └── zoraxy/
-│       └── docker-compose.yml
-├── .gitignore
+│   └── zoraxy/        # Reverse proxy & TLS
+│       ├── docker-compose.yml
+│       ├── config/    # Proxy configuration
+│       └── plugin/    # Proxy plugins
+├── .gitignore         # Excludes sensitive and runtime data
 └── README.md
 ```
 
@@ -55,49 +88,111 @@ All services run in a shared Docker network called `proxy`, so no ports need to 
 
 ---
 
-## Automations Scripts
+## Automation Scripts
 
 ### `.automations/config.sh`
 
-* Copies `.env.template` files to `.env` in each service folder  
-* Prompts user to generate passwords automatically `[Y/n]`  
-* Generates passwords for services (Vaultwarden password is hashed via temporary container)  
-* Optionally runs `start.sh` if passwords were auto-generated  
+This script handles the initial setup of your homelab:
+
+* Creates `.env` files from `.env.template` for each service
+* Offers to generate secure random passwords automatically
+* Properly hashes the Vaultwarden admin token
+* Can optionally start services after configuration
+* Validates environment files before starting
+
+Usage:
+```bash
+./.automations/config.sh
+```
 
 ### `.automations/start.sh`
 
-* Goes into every service folder containing a `docker-compose.yml`  
-* Runs `docker compose up -d`  
-* Starts all containers on the shared `proxy` network  
+This script starts all services in the correct order:
+
+1. Starts Zoraxy (reverse proxy) first
+2. Launches databases (MongoDB)
+3. Starts core services (Nextcloud, Vaultwarden)
+4. Initializes auxiliary services (AdGuard, Gotify, etc.)
+5. Finally starts monitoring (Uptime Kuma, Watchtower)
+
+Usage:
+```bash
+./.automations/start.sh
+```
 
 ### `.automations/stop.sh`
 
-* Goes into every service folder containing a `docker-compose.yml`  
-* Runs `docker compose down`  
-* Stops all containers cleanly  
+This script safely stops all services in reverse order:
 
-> These scripts allow a new user to clone the repo and get the full environment running with minimal manual setup.  
+1. Stops monitoring services first
+2. Shuts down auxiliary services
+3. Stops core applications
+4. Stops databases last
+5. Optionally removes the proxy network
+
+Usage:
+```bash
+./.automations/stop.sh
+```
+
+> The scripts ensure proper startup/shutdown order and handle the shared proxy network.
 
 ---
 
 ## Environment Files
 
-* `.env.template` – contains placeholders and explanations for credentials  
-* `.env` – actual runtime file created from template by `config.sh`  
-* Vaultwarden requires an **ADMIN_TOKEN** hashed string for admin access  
-* Services without passwords do **not** require `.env` variables  
+Each service that requires configuration has a `.env.template` file:
 
----
+* **MongoDB**: Database credentials and configuration
+* **Nextcloud**: Admin password, database settings
+* **Vaultwarden**: Admin token (automatically hashed) and SMTP settings
 
-## DIY Backup Server (Planned / Idea)
+The `config.sh` script will:
+1. Copy templates to `.env` files
+2. Generate secure random passwords
+3. Hash sensitive tokens where required
+4. Validate the configuration
 
-I plan to add a low-power backup server using a **Raspberry Pi Zero 2W** with an attached HDD/SSD:
+## Data Persistence
 
-* The Pi would run a minimal Linux + Docker setup  
-* Backup container could use `rsync`, `rclone`, or a custom Python script  
-* Drive mounted at `/mnt/backup`  
-* Scheduled backups via cron or container restart policies  
-* Optional `.env` for credentials / destinations  
+All service data is stored in volume mounts:
+
+* **AdGuard Home**: `conf/` and `work/` directories
+* **Gotify**: `data/` for application state and plugins
+* **MongoDB**: `data/` for database files
+* **Nextcloud**: `nextcloud/` for files, `db/` for database
+* **Uptime Kuma**: `data/` for monitoring history
+* **Vaultwarden**: `vw-data/` for encrypted vaults
+* **Zoraxy**: `config/` and `plugin/` for configuration
+
+These directories are automatically excluded from git via `.gitignore`.
+
+## Networking
+
+Services communicate through the `proxy` network:
+
+* Zoraxy handles all external traffic
+* Internal services are not exposed to the internet
+* TLS termination is handled by Zoraxy
+* Services reference each other by container name
+
+## Maintenance
+
+1. **Updates**:
+   * Watchtower automatically updates containers
+   * Check service logs for update status
+   * Manual updates possible via `docker compose pull`
+
+2. **Backups**:
+   * Each service has its own data directory
+   * Back up the entire `services/` directory
+   * Critical data in volume mounts (see Data Persistence)
+   * Consider using `docker compose down` before backups
+
+3. **Monitoring**:
+   * Uptime Kuma provides service monitoring
+   * Check container logs: `docker compose logs`
+   * Monitor system resources with `docker stats`
 
 > Currently this is **only a plan**. The implementation will follow later once the main HomeLab stack is stable.  
 

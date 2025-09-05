@@ -1,169 +1,172 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# Interactive HomeLab configuration script
+set -euo pipefail
 
-# ===========================
-# HomeLab Configuration
-# ===========================
+log() { printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
 
-# Function to log messages
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
-}
-
-# Function to check if Docker is running
 check_docker() {
-    if ! docker info >/dev/null 2>&1; then
-        log "Error: Docker is not running or not accessible"
-        exit 1
-    fi
+  if ! docker info >/dev/null 2>&1; then
+    log "Error: Docker not running or accessible"; exit 1
+  fi
 }
 
-# Function to check if image exists and pull if needed
-ensure_docker_image() {
-    local image="$1"
-    if ! docker image inspect "$image" >/dev/null 2>&1; then
-        log "Pulling Docker image: $image"
-        if ! docker pull "$image"; then
-            log "Error: Failed to pull Docker image $image"
-            return 1
-        fi
-    fi
+ensure_env_from_template() {
+  local svc="$1" tpl="services/$svc/.env.template" envf="services/$svc/.env"
+  if [ ! -f "$tpl" ]; then
+    log "Error: missing template $tpl"; return 1
+  fi
+  if [ ! -f "$envf" ]; then
+    mkdir -p "$(dirname "$envf")"
+    cp "$tpl" "$envf"
+    log "Created $envf from template"
+  fi
+  return 0
+}
+
+set_env_value() {
+  local file="$1" key="$2" val="$3"
+  touch "$file"
+  awk -v K="$key" -v V="$val" -F= '
+    BEGIN { OFS=FS; seen=0 }
+    $1==K { print K "=" V; seen=1; next }
+    { print }
+    END { if (!seen) print K "=" V }
+  ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+prompt_password() {
+  local prompt="$1" __outvar="$2"
+  local p1 p2
+  while true; do
+    read -s -rp "$prompt: " p1; echo
+    read -s -rp "Confirm $prompt: " p2; echo
+    if [ -z "$p1" ]; then log "Empty password not allowed"; continue; fi
+    if [ "$p1" != "$p2" ]; then log "Passwords do not match, try again"; continue; fi
+    printf -v "$__outvar" '%s' "$p1"
     return 0
+  done
 }
 
-echo "=========================="
-echo " HomeLab Configuration"
-echo "=========================="
+trim() {
+  # trim whitespace
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
 
-# Check Docker status
+log "Starting HomeLab configuration"
 check_docker
 
-# Create Docker network if it doesn't exist
-if ! docker network inspect proxy >/dev/null 2>&1; then
-    docker network create proxy
-    echo "Docker network 'proxy' created."
+# ensure docker network "proxy" exists
+if docker network inspect proxy >/dev/null 2>&1; then
+  log "Docker network 'proxy' exists"
 else
-    echo "Docker network 'proxy' already exists."
+  docker network create proxy
+  log "Created Docker network 'proxy'"
 fi
 
-# Ask if passwords should be auto-generated
-read -p "Generate passwords automatically for services that need them? [Y/n]: " AUTO_PASS
-AUTO_PASS=${AUTO_PASS:-Y}
-
-# Generate a master password for Vaultwarden hashing
-if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
-    MASTER_PASS=$(openssl rand -base64 32)
-    echo "Generated master password for Vaultwarden hashing."
+read -rp "Use one general password for all services? [y/N]: " USE_GENERAL
+USE_GENERAL=${USE_GENERAL:-N}
+if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
+  prompt_password "General password for all services (will be used where needed)" GENERAL_PASS
+  log "General password captured"
 fi
 
-# Function to hash Vaultwarden admin token
-vaultwarden_hash() {
-    local PASS="$1"
-    if [ -z "$PASS" ]; then
-        log "Error: No password provided to vaultwarden_hash"
-        return 1
-    fi
+SERVICES=(mongodb nextcloud vaultwarden)
 
-    # Ensure Vaultwarden image exists
-    if ! ensure_docker_image "vaultwarden/server"; then
-        log "Error: Failed to ensure Vaultwarden image is available"
-        return 1
-    fi
-    
-    # Try to hash the password
-    local hash_output
-    if ! hash_output=$(echo -n "$PASS" | docker run --rm -i vaultwarden/server /usr/bin/argon2 "$(openssl rand -base64 32)" -e -id -k 65540 -t 3 -p 4 2>&1); then
-        log "Error: Failed to hash password with Vaultwarden"
-        log "Error details: $hash_output"
-        return 1
-    fi
-    
-    # Get the last line which should contain only the hash
-    echo "$hash_output" | tail -n 1
-}
+for svc in "${SERVICES[@]}"; do
+  if ! ensure_env_from_template "$svc"; then log "Skipping $svc due to missing template"; continue; fi
+  ENVF="services/$svc/.env"
 
-# Function to validate .env template exists
-check_env_template() {
-    local service="$1"
-    local template="services/$service/.env.template"
-    if [ ! -f "$template" ]; then
-        log "Error: $template does not exist"
-        return 1
-    fi
-    return 0
-}
-
-# Services and their env files
-declare -A SERVICES
-SERVICES=(
-    ["mongodb"]="PASSWORD"
-    ["nextcloud"]="MYSQL_PASSWORD"
-    ["vaultwarden"]="ADMIN_TOKEN"
-)
-
-# Loop over services
-for SERVICE in "${!SERVICES[@]}"; do
-    ENV_TEMPLATE="services/$SERVICE/.env.template"
-    ENV_FILE="services/$SERVICE/.env"
-
-    # Check if template exists
-    if ! check_env_template "$SERVICE"; then
-        log "Skipping $SERVICE due to missing template"
-        continue
-    fi
-
-    # Copy .env.template if .env doesn't exist
-    if [ ! -f "$ENV_FILE" ]; then
-        cp "$ENV_TEMPLATE" "$ENV_FILE"
-        log "Created $ENV_FILE from template"
-    fi
-
-    # Fill passwords if auto-generate is chosen
-    if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
-        case $SERVICE in
-            vaultwarden)
-                if [ -z "$MASTER_PASS" ]; then
-                    MASTER_PASS=$(openssl rand -base64 32)
-                fi
-                if HASHED=$(vaultwarden_hash "$MASTER_PASS"); then
-                    grep -q "^ADMIN_TOKEN=" "$ENV_FILE" || echo "ADMIN_TOKEN=" >> "$ENV_FILE"
-                    sed -i "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$HASHED|" "$ENV_FILE"
-                    log "Set admin token for Vaultwarden in $ENV_FILE"
-                else
-                    log "Failed to set Vaultwarden admin token"
-                    continue
-                fi
-                ;;
-            mongodb)
-                PASS=$(openssl rand -base64 24)
-                grep -q "^PASSWORD=" "$ENV_FILE" || echo "PASSWORD=" >> "$ENV_FILE"
-                sed -i "s|^PASSWORD=.*|PASSWORD=$PASS|" "$ENV_FILE"
-                log "Set database password for MongoDB in $ENV_FILE"
-                ;;
-            nextcloud)
-                PASS=$(openssl rand -base64 24)
-                grep -q "^MYSQL_PASSWORD=" "$ENV_FILE" || echo "MYSQL_PASSWORD=" >> "$ENV_FILE"
-                sed -i "s|^MYSQL_PASSWORD=.*|MYSQL_PASSWORD=$PASS|" "$ENV_FILE"
-                log "Set database password for Nextcloud in $ENV_FILE"
-                ;;
-        esac
-    else
-        log "Please fill passwords manually in $ENV_FILE"
-    fi
+  if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
+    case "$svc" in
+      mongodb)
+        set_env_value "$ENVF" "PASSWORD" "$GENERAL_PASS"
+        log "MongoDB password written to $ENVF"
+        ;;
+      nextcloud)
+        set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$GENERAL_PASS"
+        set_env_value "$ENVF" "MYSQL_PASSWORD" "$GENERAL_PASS"
+        log "Nextcloud DB passwords written to $ENVF"
+        ;;
+      vaultwarden)
+        log "Vaultwarden admin token must be generated interactively inside a TTY."
+        echo
+        echo "Run in another terminal and type the SAME general password when prompted:"
+        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
+        echo
+        read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
+        # trim whitespace
+        VW_HASH="$(trim "$VW_HASH_RAW")"
+        # remove surrounding quotes if present
+        if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
+          VW_HASH="${VW_HASH:1:-1}"
+        elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
+          VW_HASH="${VW_HASH:1:-1}"
+        fi
+        # basic validation
+        if [[ "$VW_HASH" != \$argon2id* ]]; then
+          log "Error: Hash must start with '\$argon2id'. Aborting."
+          exit 1
+        fi
+        # wrap in single quotes for .env as per docs
+        VW_HASH_QUOTED="'$VW_HASH'"
+        set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
+        VW_DOMAIN="$(trim "$VW_DOMAIN")"
+        if [ -n "$VW_DOMAIN" ]; then set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"; log "Vaultwarden DOMAIN set to $VW_DOMAIN"; fi
+        log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
+        ;;
+    esac
+  else
+    case "$svc" in
+      mongodb)
+        prompt_password "MongoDB password (will be stored in $ENVF)" MONGO_PASS
+        set_env_value "$ENVF" "PASSWORD" "$MONGO_PASS"
+        log "MongoDB password written to $ENVF"
+        ;;
+      nextcloud)
+        prompt_password "Nextcloud MYSQL_ROOT_PASSWORD (will be stored in $ENVF)" NC_ROOT
+        prompt_password "Nextcloud MYSQL_PASSWORD (will be stored in $ENVF)" NC_USER
+        set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$NC_ROOT"
+        set_env_value "$ENVF" "MYSQL_PASSWORD" "$NC_USER"
+        log "Nextcloud DB passwords written to $ENVF"
+        ;;
+      vaultwarden)
+        prompt_password "Vaultwarden admin password (will NOT be stored; use it when hashing)" VW_RAW
+        echo
+        echo "To generate the Argon2id hash, open another terminal and run:"
+        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
+        echo "Type the Vaultwarden admin password (the one you just entered) when prompted, confirm it, then copy the \$argon2id... output."
+        echo
+        read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
+        VW_HASH="$(trim "$VW_HASH_RAW")"
+        # strip surrounding quotes if user pasted them
+        if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
+          VW_HASH="${VW_HASH:1:-1}"
+        elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
+          VW_HASH="${VW_HASH:1:-1}"
+        fi
+        if [[ "$VW_HASH" != \$argon2id* ]]; then
+          log "Error: Hash must start with '\$argon2id'. Aborting."
+          exit 1
+        fi
+        VW_HASH_QUOTED="'$VW_HASH'"
+        set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
+        VW_DOMAIN="$(trim "$VW_DOMAIN")"
+        if [ -n "$VW_DOMAIN" ]; then set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"; log "Vaultwarden DOMAIN set to $VW_DOMAIN"; fi
+        log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
+        ;;
+    esac
+  fi
 done
 
-# Ask if start.sh should run automatically
-if [[ "$AUTO_PASS" =~ ^[Yy]$ ]]; then
-    read -p "Start all services automatically? [Y/n]: " AUTOSTART
-    AUTOSTART=${AUTOSTART:-Y}
-    if [[ "$AUTOSTART" =~ ^[Yy]$ ]]; then
-        if [ -f "./.automations/start.sh" ]; then
-            log "Starting services..."
-            bash ./.automations/start.sh
-        else
-            log "Error: start.sh not found in .automations directory"
-        fi
-    fi
+read -rp "Start services now using ./.automations/start.sh? [y/N]: " START_NOW
+START_NOW=${START_NOW:-N}
+if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
+  if [ -f ./.automations/start.sh ]; then log "Starting services..."; bash ./.automations/start.sh; else log "start.sh not found in ./.automations"; fi
 fi
 
 log "Configuration finished."
