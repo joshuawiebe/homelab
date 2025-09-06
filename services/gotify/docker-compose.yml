@@ -2,6 +2,7 @@ services:
   gotify:
     image: gotify/server:latest
     container_name: gotify
+    hostname: gotify
     restart: unless-stopped
     volumes:
       - ./data:/app/data

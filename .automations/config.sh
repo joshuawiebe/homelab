@@ -91,6 +91,7 @@ for svc in "${SERVICES[@]}"; do
         log "Nextcloud DB passwords written to $ENVF"
         ;;
       vaultwarden)
+        echo
         log "Vaultwarden admin token must be generated interactively inside a TTY."
         echo
         echo "Run in another terminal and type the SAME general password when prompted:"
@@ -134,11 +135,10 @@ for svc in "${SERVICES[@]}"; do
         log "Nextcloud DB passwords written to $ENVF"
         ;;
       vaultwarden)
-        prompt_password "Vaultwarden admin password (will NOT be stored; use it when hashing)" VW_RAW
         echo
         echo "To generate the Argon2id hash, open another terminal and run:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo "Type the Vaultwarden admin password (the one you just entered) when prompted, confirm it, then copy the \$argon2id... output."
+        echo "Type the Vaultwarden admin password there (the password itself is NOT stored by this script), confirm it, then copy the \$argon2id... output."
         echo
         read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
         VW_HASH="$(trim "$VW_HASH_RAW")"

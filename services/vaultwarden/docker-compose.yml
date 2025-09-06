@@ -2,6 +2,7 @@ services:
   vaultwarden:
     image: vaultwarden/server:latest
     container_name: vaultwarden
+    hostname: vaultwarden
     restart: unless-stopped
     environment:
       - ADMIN_TOKEN=${ADMIN_TOKEN}

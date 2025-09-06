@@ -2,6 +2,7 @@ services:
   zoraxy:
     image: zoraxydocker/zoraxy:latest
     container_name: zoraxy
+    hostname: zoraxy
     restart: unless-stopped
     ports:
       - 80:80

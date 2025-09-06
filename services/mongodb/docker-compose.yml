@@ -2,6 +2,7 @@ services:
   mongodb:
     image: mongo:7
     container_name: mongodb
+    hostname: mongodb
     restart: unless-stopped
     networks:
       - proxy

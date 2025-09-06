@@ -2,7 +2,8 @@ services:
   uptime_kuma:
     image: louislam/uptime-kuma:latest
     container_name: uptime_kuma
-    restart: unless-stopped 
+    hostname: uptime_kuma
+    restart: unless-stopped
     volumes:
       - ./data:/app/data
     networks:

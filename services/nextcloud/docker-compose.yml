@@ -19,17 +19,22 @@ services:
       - db
 
   cron:
-   image: nextcloud
-   container_name: nextcloud_cron
-   restart: always
-   volumes:
-     - ./nextcloud:/var/www/html
-   entrypoint: /cron.sh
-   depends_on:
-     - nextcloud
+    image: nextcloud
+    container_name: nextcloud_cron
+    hostname: nextcloud_cron
+    restart: always
+    volumes:
+      - ./nextcloud:/var/www/html
+    entrypoint: /cron.sh
+    depends_on:
+      - nextcloud
+    networks:
+      - proxy
 
   db:
     image: mariadb:10.11
+    container_name: db
+    hostname: db
     restart: always
     command: --transaction-isolation=READ-COMMITTED
     volumes:
@@ -44,6 +49,8 @@ services:
 
   redis:
     image: redis:alpine
+    container_name: redis
+    hostname: redis
     restart: always
     networks:
       - proxy
