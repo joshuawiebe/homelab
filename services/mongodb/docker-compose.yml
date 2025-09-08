@@ -4,6 +4,8 @@ services:
     container_name: mongodb
     hostname: mongodb
     restart: unless-stopped
+    ports:
+      - "27017:27017"  # Default MongoDB port
     networks:
       - proxy
     environment:

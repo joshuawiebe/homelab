@@ -8,9 +8,6 @@ services:
       - "80:80"       # HTTP (Zoraxy Reverse Proxy)
       - "443:443"     # HTTPS (Zoraxy Reverse Proxy)
       - "8000:8000"   # Zoraxy Admin UI
-      - "53:53/tcp"   # AdGuard DNS (TCP)
-      - "53:53/udp"   # AdGuard DNS (UDP)
-      - "27017:27017" # MongoDB (Default)
     volumes:
       - ./config/:/opt/zoraxy/config/
       - ./plugin/:/opt/zoraxy/plugin/
