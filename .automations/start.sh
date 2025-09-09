@@ -35,10 +35,9 @@ if ! docker network inspect proxy >/dev/null 2>&1; then
     log "Created proxy network"
 fi
 
-# Define service order
+# Define service order (MongoDB removed)
 services_order=(
     "zoraxy"       # Start reverse proxy first
-    "mongodb"      # Databases next
     "vaultwarden"
     "nextcloud"
     "adguard_home"
@@ -66,3 +65,4 @@ for service in "${services_order[@]}"; do
 done
 
 log "All services started. Please check individual service logs for any issues."
+log "You can stop the services by running './stop.sh'."

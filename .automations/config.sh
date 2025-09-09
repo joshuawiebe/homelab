@@ -10,6 +10,7 @@ check_docker() {
   fi
 }
 
+# Ensure that a service has a .env file (create from template if missing)
 ensure_env_from_template() {
   local svc="$1" tpl="services/$svc/.env.template" envf="services/$svc/.env"
   if [ ! -f "$tpl" ]; then
@@ -23,6 +24,7 @@ ensure_env_from_template() {
   return 0
 }
 
+# Update or add a key=value pair in a .env file
 set_env_value() {
   local file="$1" key="$2" val="$3"
   touch "$file"
@@ -34,6 +36,7 @@ set_env_value() {
   ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
 
+# Prompt user securely for a password (with confirmation)
 prompt_password() {
   local prompt="$1" __outvar="$2"
   local p1 p2
@@ -47,8 +50,8 @@ prompt_password() {
   done
 }
 
+# Trim whitespace from a string
 trim() {
-  # trim whitespace
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
@@ -58,7 +61,7 @@ trim() {
 log "Starting HomeLab configuration"
 check_docker
 
-# ensure docker network "proxy" exists
+# Ensure docker network "proxy" exists
 if docker network inspect proxy >/dev/null 2>&1; then
   log "Docker network 'proxy' exists"
 else
@@ -66,6 +69,7 @@ else
   log "Created Docker network 'proxy'"
 fi
 
+# Ask user if one general password should be reused
 read -rp "Use one general password for all services? [y/N]: " USE_GENERAL
 USE_GENERAL=${USE_GENERAL:-N}
 if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
@@ -73,18 +77,18 @@ if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
   log "General password captured"
 fi
 
-SERVICES=(mongodb nextcloud vaultwarden)
+# List of services that require configuration
+SERVICES=(nextcloud vaultwarden)
 
 for svc in "${SERVICES[@]}"; do
-  if ! ensure_env_from_template "$svc"; then log "Skipping $svc due to missing template"; continue; fi
+  if ! ensure_env_from_template "$svc"; then 
+    log "Skipping $svc due to missing template"
+    continue
+  fi
   ENVF="services/$svc/.env"
 
   if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
     case "$svc" in
-      mongodb)
-        set_env_value "$ENVF" "PASSWORD" "$GENERAL_PASS"
-        log "MongoDB password written to $ENVF"
-        ;;
       nextcloud)
         set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$GENERAL_PASS"
         set_env_value "$ENVF" "MYSQL_PASSWORD" "$GENERAL_PASS"
@@ -92,41 +96,35 @@ for svc in "${SERVICES[@]}"; do
         ;;
       vaultwarden)
         echo
-        log "Vaultwarden admin token must be generated interactively inside a TTY."
+        log "Vaultwarden admin token must be generated interactively."
         echo
-        echo "Run in another terminal and type the SAME general password when prompted:"
+        echo "Run this in another terminal and type the SAME general password when prompted:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
         echo
         read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
-        # trim whitespace
         VW_HASH="$(trim "$VW_HASH_RAW")"
-        # remove surrounding quotes if present
         if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
           VW_HASH="${VW_HASH:1:-1}"
         elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
           VW_HASH="${VW_HASH:1:-1}"
         fi
-        # basic validation
         if [[ "$VW_HASH" != \$argon2id* ]]; then
           log "Error: Hash must start with '\$argon2id'. Aborting."
           exit 1
         fi
-        # wrap in single quotes for .env as per docs
         VW_HASH_QUOTED="'$VW_HASH'"
         set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
         read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
         VW_DOMAIN="$(trim "$VW_DOMAIN")"
-        if [ -n "$VW_DOMAIN" ]; then set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"; log "Vaultwarden DOMAIN set to $VW_DOMAIN"; fi
+        if [ -n "$VW_DOMAIN" ]; then
+          set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
+          log "Vaultwarden DOMAIN set to $VW_DOMAIN"
+        fi
         log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
         ;;
     esac
   else
     case "$svc" in
-      mongodb)
-        prompt_password "MongoDB password (will be stored in $ENVF)" MONGO_PASS
-        set_env_value "$ENVF" "PASSWORD" "$MONGO_PASS"
-        log "MongoDB password written to $ENVF"
-        ;;
       nextcloud)
         prompt_password "Nextcloud MYSQL_ROOT_PASSWORD (will be stored in $ENVF)" NC_ROOT
         prompt_password "Nextcloud MYSQL_PASSWORD (will be stored in $ENVF)" NC_USER
@@ -138,11 +136,10 @@ for svc in "${SERVICES[@]}"; do
         echo
         echo "To generate the Argon2id hash, open another terminal and run:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo "Type the Vaultwarden admin password there (the password itself is NOT stored by this script), confirm it, then copy the \$argon2id... output."
+        echo "Type the Vaultwarden admin password there, confirm it, then copy the \$argon2id... output."
         echo
         read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
         VW_HASH="$(trim "$VW_HASH_RAW")"
-        # strip surrounding quotes if user pasted them
         if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
           VW_HASH="${VW_HASH:1:-1}"
         elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
@@ -156,17 +153,26 @@ for svc in "${SERVICES[@]}"; do
         set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
         read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
         VW_DOMAIN="$(trim "$VW_DOMAIN")"
-        if [ -n "$VW_DOMAIN" ]; then set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"; log "Vaultwarden DOMAIN set to $VW_DOMAIN"; fi
+        if [ -n "$VW_DOMAIN" ]; then
+          set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
+          log "Vaultwarden DOMAIN set to $VW_DOMAIN"
+        fi
         log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
         ;;
     esac
   fi
 done
 
+# Optionally start all services after configuration
 read -rp "Start services now using ./.automations/start.sh? [y/N]: " START_NOW
 START_NOW=${START_NOW:-N}
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
-  if [ -f ./.automations/start.sh ]; then log "Starting services..."; bash ./.automations/start.sh; else log "start.sh not found in ./.automations"; fi
+  if [ -f ./.automations/start.sh ]; then
+    log "Starting services..."
+    bash ./.automations/start.sh
+  else
+    log "start.sh not found in ./.automations"
+  fi
 fi
 
 log "Configuration finished."
