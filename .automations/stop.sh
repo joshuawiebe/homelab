@@ -1,41 +1,46 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+log() { printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
 
-# Function to log messages
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
-}
+log "Stopping HomeLab services..."
 
-log "Stopping all services..."
+# Ask which reverse proxy to stop
+echo "Choose reverse proxy to stop:"
+echo "1) Traefik"
+echo "2) Zoraxy"
+read -rp "Enter choice [1-2]: " choice
 
-# Stop services in reverse order (apps first, then databases)
-services_order=(
-    "watchtower"
-    "uptime_kuma"
-    "gotify"
-    "adguard_home"
-    "nextcloud"
-    "vaultwarden"
-    "mongodb"
-    "zoraxy"  # Stop reverse proxy last
+case "$choice" in
+  1) PROXY_SERVICE="traefik" ;;
+  2) PROXY_SERVICE="zoraxy" ;;
+  *) log "Invalid choice"; exit 1 ;;
+esac
+
+# Reverse order: monitoring first, proxy last
+SERVICES=(
+  "uptime_kuma"
+  "gotify"
+  "adguard_home"
+  "vaultwarden"
+  "nextcloud"
+  "$PROXY_SERVICE"
 )
 
-for service in "${services_order[@]}"; do
-    if [ -d "./services/$service" ]; then
-        log "Stopping $service..."
-        (cd "./services/$service" && docker compose down)
-    fi
+for svc in "${SERVICES[@]}"; do
+  SERVICE_FILE="./services/$svc/docker-compose.yml"
+  if [ -f "$SERVICE_FILE" ]; then
+    log "Stopping $svc..."
+    docker compose -f "$SERVICE_FILE" down || log "Warning: failed to stop $svc"
+  else
+    log "Skipping $svc: docker-compose.yml not found"
+  fi
 done
 
-read -p "Do you want to remove the proxy network? [y/N]: " remove_network
-if [[ "$remove_network" =~ ^[Yy]$ ]]; then
-    if docker network rm proxy; then
-        log "Removed proxy network"
-    else
-        log "Warning: Could not remove proxy network. It might still be in use."
-    fi
+# Optionally remind about the proxy network
+if docker network inspect proxy >/dev/null 2>&1; then
+  log "Docker network 'proxy' still exists. You can remove it manually if desired:"
+  echo "  docker network rm proxy"
 fi
 
-log "All services stopped."
-log "You can start the services again by running './start.sh'."
+log "All selected services stopped."
