@@ -4,29 +4,44 @@ services:
     container_name: traefik
     restart: unless-stopped
     command:
+      # Core settings
       - "--api.insecure=false"
       - "--api.dashboard=true"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+
+      # Redirect HTTP -> HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+
+      # ACME DNS challenge (ipv64)
       - "--certificatesresolvers.ipv64.acme.dnschallenge=true"
       - "--certificatesresolvers.ipv64.acme.dnschallenge.provider=ipv64"
       - "--certificatesresolvers.ipv64.acme.email=${EMAIL}"
       - "--certificatesresolvers.ipv64.acme.storage=/letsencrypt/acme.json"
+
     ports:
       - "80:80"
       - "443:443"
+
     environment:
       - IPV64_TOKEN=${IPV64_TOKEN}
+
     volumes:
       - ./letsencrypt:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/localtime:/etc/localtime:ro
+
     networks:
       - proxy
+
+    security_opt:
+      - no-new-privileges:true
+
     labels:
-      # Traefik Dashboard
+      # Traefik Dashboard access
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`${TRAEFIK_SUBDOMAIN}.${BASE_DOMAIN}`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
