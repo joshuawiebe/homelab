@@ -5,7 +5,7 @@
 # Ignore service-specific .env files
 services/*/.env
 
-# Ignore Docker volumes and persistent data directories
+# Ignore Docker volumes and data directories for all services
 services/*/data/
 services/adguard_home/conf/
 services/adguard_home/work/
@@ -13,6 +13,7 @@ services/gotify/data/
 services/mongodb/data/
 services/nextcloud/db/
 services/nextcloud/nextcloud/
+services/traefik/letsencrypt/
 services/uptime_kuma/data/
 services/vaultwarden/vw-data/
 services/zoraxy/config/
@@ -27,14 +28,13 @@ services/zoraxy/plugin/
 *.sqlite3-wal
 *.wt
 
-# Ignore logs and temporary files
+# Ignore log files and temporary data
 *.log
 diagnostic.data/
 journal/
 tmp/
-cache/
 
-# Ignore OS and editor artifacts
+# Ignore OS and editor clutter
 .DS_Store
 Thumbs.db
 .vscode/
