@@ -78,7 +78,7 @@ if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
 fi
 
 # List of services that require configuration
-SERVICES=(nextcloud vaultwarden)
+SERVICES=(nextcloud vaultwarden traefik)
 
 for svc in "${SERVICES[@]}"; do
   if ! ensure_env_from_template "$svc"; then 
@@ -87,80 +87,55 @@ for svc in "${SERVICES[@]}"; do
   fi
   ENVF="services/$svc/.env"
 
-  if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
-    case "$svc" in
-      nextcloud)
+  case "$svc" in
+    nextcloud)
+      if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
         set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$GENERAL_PASS"
         set_env_value "$ENVF" "MYSQL_PASSWORD" "$GENERAL_PASS"
-        log "Nextcloud DB passwords written to $ENVF"
-        ;;
-      vaultwarden)
-        echo
-        log "Vaultwarden admin token must be generated interactively."
-        echo
-        echo "Run this in another terminal and type the SAME general password when prompted:"
-        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo
-        read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
-        VW_HASH="$(trim "$VW_HASH_RAW")"
-        if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
-          VW_HASH="${VW_HASH:1:-1}"
-        elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
-          VW_HASH="${VW_HASH:1:-1}"
-        fi
-        if [[ "$VW_HASH" != \$argon2id* ]]; then
-          log "Error: Hash must start with '\$argon2id'. Aborting."
-          exit 1
-        fi
-        VW_HASH_QUOTED="'$VW_HASH'"
-        set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
-        read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
-        VW_DOMAIN="$(trim "$VW_DOMAIN")"
-        if [ -n "$VW_DOMAIN" ]; then
-          set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
-          log "Vaultwarden DOMAIN set to $VW_DOMAIN"
-        fi
-        log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
-        ;;
-    esac
-  else
-    case "$svc" in
-      nextcloud)
+      else
         prompt_password "Nextcloud MYSQL_ROOT_PASSWORD (will be stored in $ENVF)" NC_ROOT
         prompt_password "Nextcloud MYSQL_PASSWORD (will be stored in $ENVF)" NC_USER
         set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$NC_ROOT"
         set_env_value "$ENVF" "MYSQL_PASSWORD" "$NC_USER"
-        log "Nextcloud DB passwords written to $ENVF"
-        ;;
-      vaultwarden)
-        echo
-        echo "To generate the Argon2id hash, open another terminal and run:"
-        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo "Type the Vaultwarden admin password there, confirm it, then copy the \$argon2id... output."
-        echo
-        read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
-        VW_HASH="$(trim "$VW_HASH_RAW")"
-        if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then
-          VW_HASH="${VW_HASH:1:-1}"
-        elif [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then
-          VW_HASH="${VW_HASH:1:-1}"
-        fi
-        if [[ "$VW_HASH" != \$argon2id* ]]; then
-          log "Error: Hash must start with '\$argon2id'. Aborting."
-          exit 1
-        fi
-        VW_HASH_QUOTED="'$VW_HASH'"
-        set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
-        read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
-        VW_DOMAIN="$(trim "$VW_DOMAIN")"
-        if [ -n "$VW_DOMAIN" ]; then
-          set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
-          log "Vaultwarden DOMAIN set to $VW_DOMAIN"
-        fi
-        log "Vaultwarden ADMIN_TOKEN saved to $ENVF (wrapped in single quotes)"
-        ;;
-    esac
-  fi
+      fi
+      log "Nextcloud DB passwords written to $ENVF"
+      ;;
+    vaultwarden)
+      echo
+      echo "To generate the Argon2id hash, open another terminal and run:"
+      echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
+      echo "Type the Vaultwarden admin password there, confirm it, then copy the \$argon2id... output."
+      echo
+      read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
+      VW_HASH="$(trim "$VW_HASH_RAW")"
+      if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then VW_HASH="${VW_HASH:1:-1}"; fi
+      if [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then VW_HASH="${VW_HASH:1:-1}"; fi
+      if [[ "$VW_HASH" != \$argon2id* ]]; then
+        log "Error: Hash must start with '\$argon2id'. Aborting."
+        exit 1
+      fi
+      VW_HASH_QUOTED="'$VW_HASH'"
+      set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+      read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
+      VW_DOMAIN="$(trim "$VW_DOMAIN")"
+      if [ -n "$VW_DOMAIN" ]; then
+        set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
+        log "Vaultwarden DOMAIN set to $VW_DOMAIN"
+      fi
+      log "Vaultwarden ADMIN_TOKEN saved to $ENVF"
+      ;;
+    traefik)
+      read -rp "Enter ACME email (used for SSL certs): " ACME_EMAIL
+      read -rp "Enter ipv64 API token: " IPV64_TOKEN
+      read -rp "Traefik dashboard username: " DASH_USER
+      prompt_password "Traefik dashboard password" DASH_PASS
+      set_env_value "$ENVF" "ACME_EMAIL" "$ACME_EMAIL"
+      set_env_value "$ENVF" "IPV64_API_TOKEN" "$IPV64_TOKEN"
+      set_env_value "$ENVF" "TRAEFIK_DASHBOARD_USER" "$DASH_USER"
+      set_env_value "$ENVF" "TRAEFIK_DASHBOARD_PASSWORD" "$DASH_PASS"
+      log "Traefik environment saved to $ENVF"
+      ;;
+  esac
 done
 
 # Optionally start all services after configuration

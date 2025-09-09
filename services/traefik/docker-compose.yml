@@ -1,0 +1,37 @@
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    hostname: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80" # HTTP (Traefik Reverse Proxy)
+      - "443:443" # HTTPS (Traefik Reverse Proxy)
+      - "8080:8080" # Traefik Admin Dashboard (secured with password)
+    volumes:
+      - ./letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/localtime:/etc/localtime
+    env_file:
+      - .env
+    command:
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.dnsresolver.acme.dnschallenge=true
+      - --certificatesresolvers.dnsresolver.acme.dnschallenge.provider=ipv64
+      - --certificatesresolvers.dnsresolver.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.dnsresolver.acme.storage=/letsencrypt/acme.json
+    environment:
+      IPV64_API_TOKEN: ${IPV64_API_TOKEN}
+      TRAEFIK_DASHBOARD_USER: ${TRAEFIK_DASHBOARD_USER}
+      TRAEFIK_DASHBOARD_PASSWORD: ${TRAEFIK_DASHBOARD_PASSWORD}
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
