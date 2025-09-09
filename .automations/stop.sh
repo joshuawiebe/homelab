@@ -44,3 +44,4 @@ if docker network inspect proxy >/dev/null 2>&1; then
 fi
 
 log "All selected services stopped."
+log "You can start them again with .automations/start.sh"

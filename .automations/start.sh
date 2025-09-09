@@ -66,4 +66,4 @@ for service in "${services_order[@]}"; do
 done
 
 log "All services started with $PROXY_SERVICE as reverse proxy."
-log "Stop them with './stop.sh'."
+log "You can stop them with '.automations/stop.sh'."

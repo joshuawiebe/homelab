@@ -74,8 +74,9 @@ else
 fi
 
 # General password option
-read -rp "Use one general password for all services? [y/N]: " USE_GENERAL
-USE_GENERAL=${USE_GENERAL:-N}
+USE_GENERAL=""
+read -rp "Use one general password for all services? [y/N]: " USE_GENERAL_INPUT
+USE_GENERAL=${USE_GENERAL_INPUT:-N}
 if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
   prompt_password "General password for all services (used where needed)" GENERAL_PASS
   log "General password captured"
@@ -112,9 +113,7 @@ for svc in "${SERVICES[@]}"; do
   ensure_env_from_template "$svc"
 
   # Prompt subdomain
-  set +u
   read -rp "Enter subdomain for $svc (e.g., 'vault' for vault.${BASE_DOMAIN}): " SUBDOMAIN
-  set -u
   FULL_DOMAIN="${SUBDOMAIN}.${BASE_DOMAIN}"
   set_env_value "$SERVICE_ENV" "DOMAIN" "$FULL_DOMAIN"
   log "$svc DOMAIN set to $FULL_DOMAIN"
@@ -132,9 +131,7 @@ for svc in "${SERVICES[@]}"; do
         echo "Generate Vaultwarden Argon2id hash using the same general password in another terminal:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
         echo
-        set +u
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
-        set -u
         VW_HASH="$(trim "$VW_HASH_RAW")"
         VW_HASH_QUOTED="'$VW_HASH'"
         set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
@@ -154,9 +151,7 @@ for svc in "${SERVICES[@]}"; do
         echo "Generate Vaultwarden Argon2id hash in another terminal:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
         echo
-        set +u
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
-        set -u
         VW_HASH="$(trim "$VW_HASH_RAW")"
         VW_HASH_QUOTED="'$VW_HASH'"
         set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
