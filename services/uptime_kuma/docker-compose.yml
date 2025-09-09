@@ -8,6 +8,12 @@ services:
       - ./data:/app/data
     networks:
       - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptime_kuma.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.uptime_kuma.entrypoints=websecure"
+      - "traefik.http.routers.uptime_kuma.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.uptime_kuma.tls.domains[0].main=${DOMAIN}"
 
 networks:
   proxy:

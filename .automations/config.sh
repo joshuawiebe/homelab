@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive HomeLab configuration script
+# Interactive HomeLab configuration script with Traefik
 set -euo pipefail
 
 log() { printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -10,7 +10,6 @@ check_docker() {
   fi
 }
 
-# Ensure that a service has a .env file (create from template if missing)
 ensure_env_from_template() {
   local svc="$1" tpl="services/$svc/.env.template" envf="services/$svc/.env"
   if [ ! -f "$tpl" ]; then
@@ -24,7 +23,6 @@ ensure_env_from_template() {
   return 0
 }
 
-# Update or add a key=value pair in a .env file
 set_env_value() {
   local file="$1" key="$2" val="$3"
   touch "$file"
@@ -36,7 +34,6 @@ set_env_value() {
   ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
 
-# Prompt user securely for a password (with confirmation)
 prompt_password() {
   local prompt="$1" __outvar="$2"
   local p1 p2
@@ -50,7 +47,6 @@ prompt_password() {
   done
 }
 
-# Trim whitespace from a string
 trim() {
   local s="$1"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -61,7 +57,7 @@ trim() {
 log "Starting HomeLab configuration"
 check_docker
 
-# Ensure docker network "proxy" exists
+# Ensure proxy network exists
 if docker network inspect proxy >/dev/null 2>&1; then
   log "Docker network 'proxy' exists"
 else
@@ -69,76 +65,81 @@ else
   log "Created Docker network 'proxy'"
 fi
 
-# Ask user if one general password should be reused
+# General password option
 read -rp "Use one general password for all services? [y/N]: " USE_GENERAL
 USE_GENERAL=${USE_GENERAL:-N}
 if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
-  prompt_password "General password for all services (will be used where needed)" GENERAL_PASS
+  prompt_password "General password for all services (used where needed)" GENERAL_PASS
   log "General password captured"
 fi
 
-# List of services that require configuration
-SERVICES=(nextcloud vaultwarden traefik)
+# Traefik setup
+TRA_ENV="services/traefik/.env"
+ensure_env_from_template "traefik"
+
+read -rp "Enter ACME email (for SSL certificates): " ACME_EMAIL
+read -rp "Enter ipv64.net API token: " IPV64_TOKEN
+read -rp "Traefik dashboard username: " DASH_USER
+prompt_password "Traefik dashboard password" DASH_PASS
+read -rp "Enter base domain (e.g., joshua.home64.de): " BASE_DOMAIN
+
+set_env_value "$TRA_ENV" "EMAIL" "$ACME_EMAIL"
+set_env_value "$TRA_ENV" "IPV64_TOKEN" "$IPV64_TOKEN"
+set_env_value "$TRA_ENV" "DASHBOARD_USER" "$DASH_USER"
+set_env_value "$TRA_ENV" "DASHBOARD_PASSWORD" "$DASH_PASS"
+set_env_value "$TRA_ENV" "BASE_DOMAIN" "$BASE_DOMAIN"
+
+log "Traefik environment configured"
+
+# Services
+SERVICES=(nextcloud vaultwarden gotify uptime_kuma adguard_home)
 
 for svc in "${SERVICES[@]}"; do
-  if ! ensure_env_from_template "$svc"; then 
-    log "Skipping $svc due to missing template"
-    continue
-  fi
-  ENVF="services/$svc/.env"
+  SERVICE_ENV="services/$svc/.env"
+  ensure_env_from_template "$svc"
 
-  case "$svc" in
-    nextcloud)
-      if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
-        set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$GENERAL_PASS"
-        set_env_value "$ENVF" "MYSQL_PASSWORD" "$GENERAL_PASS"
-      else
-        prompt_password "Nextcloud MYSQL_ROOT_PASSWORD (will be stored in $ENVF)" NC_ROOT
-        prompt_password "Nextcloud MYSQL_PASSWORD (will be stored in $ENVF)" NC_USER
-        set_env_value "$ENVF" "MYSQL_ROOT_PASSWORD" "$NC_ROOT"
-        set_env_value "$ENVF" "MYSQL_PASSWORD" "$NC_USER"
-      fi
-      log "Nextcloud DB passwords written to $ENVF"
-      ;;
-    vaultwarden)
-      echo
-      echo "To generate the Argon2id hash, open another terminal and run:"
-      echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-      echo "Type the Vaultwarden admin password there, confirm it, then copy the \$argon2id... output."
-      echo
-      read -rp "Paste the full \$argon2id... hash here: " VW_HASH_RAW
-      VW_HASH="$(trim "$VW_HASH_RAW")"
-      if [[ "$VW_HASH" == \"*\" && "$VW_HASH" == *\" ]]; then VW_HASH="${VW_HASH:1:-1}"; fi
-      if [[ "$VW_HASH" == \'*\' && "$VW_HASH" == *\' ]]; then VW_HASH="${VW_HASH:1:-1}"; fi
-      if [[ "$VW_HASH" != \$argon2id* ]]; then
-        log "Error: Hash must start with '\$argon2id'. Aborting."
-        exit 1
-      fi
-      VW_HASH_QUOTED="'$VW_HASH'"
-      set_env_value "$ENVF" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
-      read -rp "Vaultwarden domain for .env (e.g. vault.example.com) [leave empty to skip]: " VW_DOMAIN
-      VW_DOMAIN="$(trim "$VW_DOMAIN")"
-      if [ -n "$VW_DOMAIN" ]; then
-        set_env_value "$ENVF" "DOMAIN" "$VW_DOMAIN"
-        log "Vaultwarden DOMAIN set to $VW_DOMAIN"
-      fi
-      log "Vaultwarden ADMIN_TOKEN saved to $ENVF"
-      ;;
-    traefik)
-      read -rp "Enter ACME email (used for SSL certs): " ACME_EMAIL
-      read -rp "Enter ipv64 API token: " IPV64_TOKEN
-      read -rp "Traefik dashboard username: " DASH_USER
-      prompt_password "Traefik dashboard password" DASH_PASS
-      set_env_value "$ENVF" "ACME_EMAIL" "$ACME_EMAIL"
-      set_env_value "$ENVF" "IPV64_API_TOKEN" "$IPV64_TOKEN"
-      set_env_value "$ENVF" "TRAEFIK_DASHBOARD_USER" "$DASH_USER"
-      set_env_value "$ENVF" "TRAEFIK_DASHBOARD_PASSWORD" "$DASH_PASS"
-      log "Traefik environment saved to $ENVF"
-      ;;
-  esac
+  # Prompt subdomain
+  read -rp "Enter subdomain for $svc (e.g., 'vault' for vault.${BASE_DOMAIN}): " SUBDOMAIN
+  FULL_DOMAIN="${SUBDOMAIN}.${BASE_DOMAIN}"
+  set_env_value "$SERVICE_ENV" "DOMAIN" "$FULL_DOMAIN"
+  log "$svc DOMAIN set to $FULL_DOMAIN"
+
+  # Handle passwords / tokens
+  if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
+    case "$svc" in
+      nextcloud)
+        set_env_value "$SERVICE_ENV" "MYSQL_ROOT_PASSWORD" "$GENERAL_PASS"
+        set_env_value "$SERVICE_ENV" "MYSQL_PASSWORD" "$GENERAL_PASS"
+        set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
+        ;;
+      vaultwarden)
+        echo "Generate Vaultwarden Argon2id hash using same password in another terminal"
+        read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
+        VW_HASH="$(trim "$VW_HASH_RAW")"
+        VW_HASH_QUOTED="'$VW_HASH'"
+        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        ;;
+    esac
+  else
+    case "$svc" in
+      nextcloud)
+        prompt_password "Nextcloud MYSQL_ROOT_PASSWORD" NC_ROOT
+        prompt_password "Nextcloud MYSQL_PASSWORD" NC_USER
+        set_env_value "$SERVICE_ENV" "MYSQL_ROOT_PASSWORD" "$NC_ROOT"
+        set_env_value "$SERVICE_ENV" "MYSQL_PASSWORD" "$NC_USER"
+        set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
+        ;;
+      vaultwarden)
+        echo "Generate Vaultwarden Argon2id hash in another terminal"
+        read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
+        VW_HASH="$(trim "$VW_HASH_RAW")"
+        VW_HASH_QUOTED="'$VW_HASH'"
+        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        ;;
+    esac
+  fi
 done
 
-# Optionally start all services after configuration
 read -rp "Start services now using ./.automations/start.sh? [y/N]: " START_NOW
 START_NOW=${START_NOW:-N}
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then

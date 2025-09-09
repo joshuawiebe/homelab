@@ -11,6 +11,12 @@ services:
       - ./vw-data:/data/
     networks:
       - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vaultwarden.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.vaultwarden.entrypoints=websecure"
+      - "traefik.http.routers.vaultwarden.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.vaultwarden.tls.domains[0].main=${DOMAIN}"
 
 networks:
   proxy:
