@@ -6,14 +6,22 @@ log() { printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
 
 check_docker() {
   if ! docker info >/dev/null 2>&1; then
-    log "Error: Docker not running or accessible"; exit 1
+    log "Error: Docker not running or accessible"
+    exit 1
   fi
 }
 
 ensure_env_from_template() {
-  local svc="$1" tpl="services/$svc/.env.template" envf="services/$svc/.env"
+  local svc="${1:-}"
+  if [ -z "$svc" ]; then
+    log "Error: no service name provided to ensure_env_from_template"
+    return 1
+  fi
+  local tpl="services/$svc/.env.template"
+  local envf="services/$svc/.env"
   if [ ! -f "$tpl" ]; then
-    log "Error: missing template $tpl"; return 1
+    log "Error: missing template $tpl"
+    return 1
   fi
   if [ ! -f "$envf" ]; then
     mkdir -p "$(dirname "$envf")"
@@ -95,11 +103,18 @@ log "Traefik environment configured"
 SERVICES=(nextcloud vaultwarden gotify uptime_kuma adguard_home)
 
 for svc in "${SERVICES[@]}"; do
+  if [ -z "$svc" ]; then
+    log "Warning: empty service in SERVICES array, skipping"
+    continue
+  fi
+
   SERVICE_ENV="services/$svc/.env"
   ensure_env_from_template "$svc"
 
   # Prompt subdomain
+  set +u
   read -rp "Enter subdomain for $svc (e.g., 'vault' for vault.${BASE_DOMAIN}): " SUBDOMAIN
+  set -u
   FULL_DOMAIN="${SUBDOMAIN}.${BASE_DOMAIN}"
   set_env_value "$SERVICE_ENV" "DOMAIN" "$FULL_DOMAIN"
   log "$svc DOMAIN set to $FULL_DOMAIN"
@@ -113,8 +128,13 @@ for svc in "${SERVICES[@]}"; do
         set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
         ;;
       vaultwarden)
-        echo "Generate Vaultwarden Argon2id hash using same password in another terminal"
+        echo
+        echo "Generate Vaultwarden Argon2id hash using the same general password in another terminal:"
+        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
+        echo
+        set +u
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
+        set -u
         VW_HASH="$(trim "$VW_HASH_RAW")"
         VW_HASH_QUOTED="'$VW_HASH'"
         set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
@@ -130,8 +150,13 @@ for svc in "${SERVICES[@]}"; do
         set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
         ;;
       vaultwarden)
-        echo "Generate Vaultwarden Argon2id hash in another terminal"
+        echo
+        echo "Generate Vaultwarden Argon2id hash in another terminal:"
+        echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
+        echo
+        set +u
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
+        set -u
         VW_HASH="$(trim "$VW_HASH_RAW")"
         VW_HASH_QUOTED="'$VW_HASH'"
         set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
