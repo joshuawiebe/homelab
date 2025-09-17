@@ -13,10 +13,6 @@ check_docker() {
 
 ensure_env_from_template() {
   local svc="${1:-}"
-  if [ -z "$svc" ]; then
-    log "Error: no service name provided to ensure_env_from_template"
-    return 1
-  fi
   local tpl="services/$svc/.env.template"
   local envf="services/$svc/.env"
   if [ ! -f "$tpl" ]; then
@@ -28,7 +24,6 @@ ensure_env_from_template() {
     cp "$tpl" "$envf"
     log "Created $envf from template"
   fi
-  return 0
 }
 
 set_env_value() {
@@ -91,12 +86,14 @@ read -rp "Enter ipv64.net API token: " IPV64_TOKEN
 read -rp "Traefik dashboard username: " DASH_USER
 prompt_password "Traefik dashboard password" DASH_PASS
 read -rp "Enter base domain (e.g., joshua.home64.de): " BASE_DOMAIN
+read -rp "Enter subdomain for Traefik dashboard (e.g., 'traefik'): " TRAEFIK_SUBDOMAIN
 
 set_env_value "$TRA_ENV" "EMAIL" "$ACME_EMAIL"
 set_env_value "$TRA_ENV" "IPV64_TOKEN" "$IPV64_TOKEN"
 set_env_value "$TRA_ENV" "DASHBOARD_USER" "$DASH_USER"
 set_env_value "$TRA_ENV" "DASHBOARD_PASSWORD" "$DASH_PASS"
 set_env_value "$TRA_ENV" "BASE_DOMAIN" "$BASE_DOMAIN"
+set_env_value "$TRA_ENV" "TRAEFIK_SUBDOMAIN" "$TRAEFIK_SUBDOMAIN"
 
 log "Traefik environment configured"
 
@@ -104,21 +101,14 @@ log "Traefik environment configured"
 SERVICES=(nextcloud vaultwarden gotify uptime_kuma adguard_home)
 
 for svc in "${SERVICES[@]}"; do
-  if [ -z "$svc" ]; then
-    log "Warning: empty service in SERVICES array, skipping"
-    continue
-  fi
-
   SERVICE_ENV="services/$svc/.env"
   ensure_env_from_template "$svc"
 
-  # Prompt subdomain
   read -rp "Enter subdomain for $svc (e.g., 'vault' for vault.${BASE_DOMAIN}): " SUBDOMAIN
   FULL_DOMAIN="${SUBDOMAIN}.${BASE_DOMAIN}"
   set_env_value "$SERVICE_ENV" "DOMAIN" "$FULL_DOMAIN"
   log "$svc DOMAIN set to $FULL_DOMAIN"
 
-  # Handle passwords / tokens
   if [[ "$USE_GENERAL" =~ ^[Yy]$ ]]; then
     case "$svc" in
       nextcloud)
@@ -127,14 +117,11 @@ for svc in "${SERVICES[@]}"; do
         set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
         ;;
       vaultwarden)
-        echo
-        echo "Generate Vaultwarden Argon2id hash using the same general password in another terminal:"
+        echo "Generate Vaultwarden Argon2id hash with:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
         VW_HASH="$(trim "$VW_HASH_RAW")"
-        VW_HASH_QUOTED="'$VW_HASH'"
-        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH"
         ;;
     esac
   else
@@ -147,14 +134,11 @@ for svc in "${SERVICES[@]}"; do
         set_env_value "$SERVICE_ENV" "HSTS_ENABLED" "true"
         ;;
       vaultwarden)
-        echo
-        echo "Generate Vaultwarden Argon2id hash in another terminal:"
+        echo "Generate Vaultwarden Argon2id hash with:"
         echo "  docker run --rm -it vaultwarden/server /vaultwarden hash"
-        echo
         read -rp "Paste the full \$argon2id hash: " VW_HASH_RAW
         VW_HASH="$(trim "$VW_HASH_RAW")"
-        VW_HASH_QUOTED="'$VW_HASH'"
-        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH_QUOTED"
+        set_env_value "$SERVICE_ENV" "ADMIN_TOKEN" "$VW_HASH"
         ;;
     esac
   fi

@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   traefik:
     image: traefik:latest
@@ -11,11 +13,9 @@ services:
       - "--entrypoints.websecure.address=:443"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-
       # Redirect HTTP -> HTTPS
       - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
       - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
-
       # ACME DNS challenge (ipv64)
       - "--certificatesresolvers.ipv64.acme.dnschallenge=true"
       - "--certificatesresolvers.ipv64.acme.dnschallenge.provider=ipv64"
@@ -27,7 +27,7 @@ services:
       - "443:443"
 
     environment:
-      - IPV64_TOKEN=${IPV64_TOKEN}
+      - IPV64_API_KEY=${IPV64_API_KEY}
 
     volumes:
       - ./letsencrypt:/letsencrypt
@@ -39,16 +39,27 @@ services:
 
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
 
     labels:
-      # Traefik Dashboard access
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`${TRAEFIK_SUBDOMAIN}.${BASE_DOMAIN}`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.tls.certresolver=ipv64"
-      - "traefik.http.routers.traefik.middlewares=traefik-auth"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth,security-headers"
       - "traefik.http.middlewares.traefik-auth.basicauth.users=${DASHBOARD_USER}:${DASHBOARD_PASSWORD}"
+      - "traefik.http.middlewares.security-headers.headers.sslredirect=true"
+      - "traefik.http.middlewares.security-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.security-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.security-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.security-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.security-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.security-headers.headers.referrerPolicy=same-origin"
+      - "traefik.http.middlewares.security-headers.headers.permissionsPolicy=accelerometer=(),camera=(),geolocation=()"
 
 networks:
   proxy:

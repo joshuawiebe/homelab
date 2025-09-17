@@ -32,13 +32,13 @@ fi
 
 # Ask which reverse proxy to use
 echo "Choose reverse proxy:"
-echo "1) Zoraxy"
-echo "2) Traefik"
+echo "1) Traefik"
+echo "2) Zoraxy"
 read -rp "Enter choice [1-2]: " choice
 
 case "$choice" in
-  1) PROXY_SERVICE="zoraxy" ;;
-  2) PROXY_SERVICE="traefik" ;;
+  1) PROXY_SERVICE="traefik" ;;
+  2) PROXY_SERVICE="zoraxy" ;;
   *) log "Invalid choice"; exit 1 ;;
 esac
 
