@@ -216,4 +216,3 @@ docker run --rm -it vaultwarden/server /vaultwarden hash
 ## License
 
 MIT — free to use, adapt, and learn from. Do not commit live credentials.
-
