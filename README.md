@@ -10,39 +10,39 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 
 1. **Clone the repository**:
 
-    ```bash
-    git clone https://github.com/joshuawiebe/homelab.git
-    cd homelab
-    ```
+   ```bash
+   git clone https://github.com/joshuawiebe/homelab.git
+   cd homelab
+   ```
 
 2. **Run configuration**:
 
-    ```bash
-    ./.automations/config.sh
-        ```
+   ```bash
+   ./.automations/config.sh
+   ```
 
-    * Set the **base domain** (e.g., `example.com`)
-    * Set **subdomains** for each service
-    * Provide **ACME email** and **IPv64 DNS API token**
-    * Optionally generate passwords automatically
+   * Set the **base domain** (e.g., `example.com`)
+   * Set **subdomains** for each service
+   * Provide **ACME email** and **IPv64 DNS API token**
+   * Optionally generate passwords automatically
 
 3. **Start all services**:
 
-    ```bash
-    ./.automations/start.sh
-    ```
+   ```bash
+   ./.automations/start.sh
+   ```
 
 4. **Stop services**:
 
-    ```bash
-    ./.automations/stop.sh
-    ```
+   ```bash
+   ./.automations/stop.sh
+   ```
 
 ---
 
 ## Repository Structure
 
-``` filetree
+```filetree
 /homelab/
 ├── .automations/
 │   ├── config.sh
@@ -102,11 +102,12 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 
 ## Auto Backup Automation (Borg)
 
-The new `auto_backup/` folder provides a fully automated **daily backup system** using **Borg**. Backups run on a USB drive, prune old archives, and log activity.
+The `auto_backup/` folder provides a fully automated **daily backup system** using **Borg**.
+Backups run on a USB drive, prune old archives, and log activity.
 
 ### Folder structure
 
-``` filetree
+```filetree
 auto_backup/
 ├── backup_setup.sh      # Interactive setup, generates .env, systemd service/timer
 ├── backup_start.sh      # Runs the backup based on .env config
@@ -126,32 +127,32 @@ auto_backup/
 
 1. **Run setup**:
 
-    ```bash
-    cd auto_backup
-    ./backup_setup.sh
-    ```
+   ```bash
+   cd auto_backup
+   ./backup_setup.sh
+   ```
 
-    * Answer prompts for USB label, mount path, repo path, backup source, passphrase, and daily backup time.
-    * Generates `.env` file and systemd service/timer.
+   * Answer prompts for USB label, mount path, repo path, backup source, passphrase, and daily backup time.
+   * Generates `.env` file and systemd service/timer.
 
 2. **Test backup manually**:
 
-    ```bash
-    systemctl start auto_backup.service
-    journalctl -u auto_backup.service -n 50
-    ```
+   ```bash
+   systemctl start auto_backup.service
+   journalctl -u auto_backup.service -n 50
+   ```
 
 3. **Stop automation**:
 
-    ```bash
-    ./backup_stop.sh
-    ```
+   ```bash
+   ./backup_stop.sh
+   ```
 
 4. **Stop and remove automation** (optional):
 
-    ```bash
-    ./backup_stop.sh --remove
-    ```
+   ```bash
+   ./backup_stop.sh --remove
+   ```
 
 ---
 
@@ -216,3 +217,4 @@ docker run --rm -it vaultwarden/server /vaultwarden hash
 ## License
 
 MIT — free to use, adapt, and learn from. Do not commit live credentials.
+

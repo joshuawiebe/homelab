@@ -1,87 +1,57 @@
-#!/bin/bash
-# auto_backup/backup_setup.sh
-# Interactive setup for Borg backup automation
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
 
-echo "=== Borg Auto Backup Setup ==="
+echo "=== Auto Backup Setup ==="
 
-# Ask user for config
-read -p "USB drive label [BACKUP_USB]: " usb_label
-read -p "Mount path [/mnt/backup_usb]: " mount_path
-read -p "Source path to backup [/]: " src
-read -p "Repo path [/mnt/backup_usb/borgrepo]: " repo
-read -p "Borg passphrase (no echo): " -s passphrase
-echo
-read -p "Daily backup time [02:00:00]: " backup_time
+# Ask for config
+read -rp "Enter USB device path (e.g., /dev/sda1): " USB_DEVICE
+read -rp "Enter USB mount point (e.g., /mnt/backup_usb): " USB_MOUNTPOINT
+read -rp "Enter source path to back up (e.g., /mnt/ssd/): " SOURCE_PATH
+read -rp "Enter systemd service name (default: auto-backup): " SERVICE_NAME
+SERVICE_NAME=${SERVICE_NAME:-auto-backup}
 
-# Apply defaults if empty
-usb_label=${usb_label:-BACKUP_USB}
-mount_path=${mount_path:-/mnt/backup_usb}
-src=${src:-/}
-repo=${repo:-$mount_path/borgrepo}
-passphrase=${passphrase:-changeme}
-backup_time=${backup_time:-02:00:00}
-
-# Write .env file
-cat > .env <<EOF
-BACKUP_USB_LABEL=$usb_label
-BACKUP_MOUNT=$mount_path
-BACKUP_SRC=$src
-BORG_REPO=$repo
-BORG_PASSPHRASE=$passphrase
-LOG_FILE=$mount_path/backup.log
-BACKUP_TIME=$backup_time
+# Save to .env
+cat > "$ENV_FILE" <<EOF
+USB_DEVICE=$USB_DEVICE
+USB_MOUNTPOINT=$USB_MOUNTPOINT
+SOURCE_PATH=$SOURCE_PATH
+SERVICE_NAME=$SERVICE_NAME
 EOF
 
-echo ".env created!"
+echo "[INFO] Configuration saved to $ENV_FILE"
 
-# Ensure mount point exists
-sudo mkdir -p "$mount_path"
+# Create systemd service file
+SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
 
-# Install Borg if missing
-if ! command -v borg &> /dev/null; then
-    echo "Installing borg..."
-    sudo apt update && sudo apt install -y borgbackup
-fi
-
-# Initialize repo if not exists
-if [ ! -d "$repo" ]; then
-    echo "Initializing Borg repo..."
-    BORG_PASSPHRASE=$passphrase borg init --encryption=repokey-blake2 "$repo"
-fi
-
-# Create systemd service
-SERVICE_FILE="/etc/systemd/system/auto_backup.service"
-sudo tee $SERVICE_FILE > /dev/null <<EOF
+sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
-Description=Daily Borg Backup (from homelab/auto_backup)
+Description=Automatic Borg Backup
 
 [Service]
 Type=oneshot
-User=$(whoami)
-EnvironmentFile=$PWD/.env
-ExecStart=$PWD/backup_start.sh
+EnvironmentFile=$ENV_FILE
+ExecStart=$SCRIPT_DIR/backup_start.sh
 EOF
 
-# Create systemd timer
-TIMER_FILE="/etc/systemd/system/auto_backup.timer"
-sudo tee $TIMER_FILE > /dev/null <<EOF
+# Create systemd timer file (daily at 02:00)
+sudo tee "$TIMER_FILE" > /dev/null <<EOF
 [Unit]
-Description=Run Borg backup daily
+Description=Run automatic backup daily at 02:00
 
 [Timer]
-OnCalendar=*-*-* $backup_time
+OnCalendar=*-*-* 02:00:00
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 
+# Enable timer
 sudo systemctl daemon-reload
-sudo systemctl enable --now auto_backup.timer
+sudo systemctl enable --now "$SERVICE_NAME.timer"
 
-echo "✅ Setup complete! Backup runs daily at $backup_time"
-echo "Check status with: sudo systemctl status auto_backup.timer"
-echo "View logs with: journalctl -u auto_backup.service"
+echo "[INFO] Systemd service and timer installed and started."

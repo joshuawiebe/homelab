@@ -1,25 +1,31 @@
-#!/bin/bash
-# auto_backup/backup_stop.sh
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
 
-echo "Stopping auto backup..."
-sudo systemctl disable --now auto_backup.timer
-sudo systemctl stop auto_backup.service || true
-
-if [ "$1" == "--remove" ]; then
-    echo "Removing systemd service and timer..."
-    sudo rm -f /etc/systemd/system/auto_backup.service
-    sudo rm -f /etc/systemd/system/auto_backup.timer
-    sudo systemctl daemon-reload
-    echo "✅ Service and timer removed."
-
-    read -p "Do you also want to remove the .env file? (y/N): " choice
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        rm -f .env
-        echo ".env file removed."
-    fi
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "[ERROR] No .env file found in $SCRIPT_DIR"
+  exit 1
 fi
 
-echo "✅ Backup automation stopped."
+source "$ENV_FILE"
+SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
+
+echo "[INFO] Stopping and disabling $SERVICE_NAME.timer..."
+sudo systemctl disable --now "$SERVICE_NAME.timer" || true
+
+echo "[INFO] Removing systemd unit files..."
+sudo rm -f "$SERVICE_FILE" "$TIMER_FILE"
+
+echo "[INFO] Reloading systemd..."
+sudo systemctl daemon-reload
+
+read -rp "Do you also want to remove $ENV_FILE? [y/N]: " REMOVE_ENV
+if [[ "$REMOVE_ENV" =~ ^[Yy]$ ]]; then
+  rm -f "$ENV_FILE"
+  echo "[INFO] Removed $ENV_FILE"
+fi
+
+echo "[INFO] Auto backup stopped and cleaned up."

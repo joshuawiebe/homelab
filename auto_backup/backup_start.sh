@@ -1,28 +1,31 @@
-#!/bin/bash
-# auto_backup/backup_start.sh
-# Runs the backup using .env config
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
-cd "$(dirname "$0")"
-source .env
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/.env"
 
-echo "Backup started at $(date)" >> $LOG_FILE
+echo "[INFO] Starting backup job..."
 
-# Mount USB if not mounted
-if ! mountpoint -q "$BACKUP_MOUNT"; then
-    sudo mount -L $BACKUP_USB_LABEL "$BACKUP_MOUNT"
-fi
+# 1. Mount USB
+echo "[INFO] Mounting USB drive..."
+sudo mount "$USB_DEVICE" "$USB_MOUNTPOINT"
 
-# Run Borg backup
-borg create --verbose --stats --progress \
-    $BORG_REPO::'{hostname}-{now:%Y-%m-%d}' \
-    $BACKUP_SRC >> $LOG_FILE 2>&1
+# 2. Prune before backup
+echo "[INFO] Pruning old backups (pre)..."
+sudo borg prune -v --list "$USB_MOUNTPOINT" --keep-last 3
 
-# Prune old backups (keep last 7 daily)
-borg prune -v --keep-daily=7 $BORG_REPO >> $LOG_FILE 2>&1
+# 3. Create backup
+echo "[INFO] Creating new backup..."
+sudo borg create \
+    "$USB_MOUNTPOINT::ssd-$(date +%F-%H%M%S)" \
+    "$SOURCE_PATH"
 
-# Unmount USB
-sudo umount "$BACKUP_MOUNT"
+# 4. Prune after backup
+echo "[INFO] Pruning old backups (post)..."
+sudo borg prune -v --list "$USB_MOUNTPOINT" --keep-last 3
 
-echo "Backup finished at $(date)" >> $LOG_FILE
-echo "----------------------------------------" >> $LOG_FILE
+# 5. Unmount
+echo "[INFO] Unmounting USB drive..."
+sudo umount "$USB_MOUNTPOINT"
+
+echo "[INFO] Backup finished successfully!"
