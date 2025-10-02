@@ -52,16 +52,18 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 │   ├── adguard_home/
 │   ├── gotify/
 │   ├── nextcloud/
+│   ├── traefik/
 │   ├── uptime_kuma/
 │   ├── vaultwarden/
 │   ├── watchtower/
-│   └── traefik/
-├── auto_backup/            # Borg backup automation
+│   └── zoraxy/
+├── auto_backup/
 │   ├── backup_setup.sh
 │   ├── backup_start.sh
-│   ├── backup_stop.sh
+│   ├── backup_remove.sh
 │   └── .env.sample
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
@@ -76,6 +78,7 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 * **Gotify** – push notifications
 * **Uptime Kuma** – uptime monitoring
 * **Watchtower** – automatic container updates
+* **Zoraxy** - alternative reverse proxy, HTTPS, ACME DNS challenge
 
 ---
 
@@ -112,7 +115,7 @@ Backups run on a USB drive, prune old archives, and log activity.
 auto_backup/
 ├── backup_setup.sh      # Interactive setup, generates .env, systemd service/timer
 ├── backup_start.sh      # Runs the backup based on .env config
-├── backup_stop.sh       # Stops or removes automation
+├── backup_remove.sh     # removes the setup of this automation
 ├── .env.sample          # Sample configuration
 ```
 
@@ -122,7 +125,7 @@ auto_backup/
 * Daily backups with pruning (keep last 7 daily by default)
 * Logs stored on the USB drive
 * Systemd timer ensures automatic execution
-* Stop or fully remove automation with `backup_stop.sh`
+* Remove automation setup with `backup_remove.sh`
 * Automatically detects reverse proxy via `.automations/start.sh` and `.automations/stop.sh`
 
 ### Setup & Usage
@@ -131,7 +134,7 @@ auto_backup/
 
    ```bash
    cd auto_backup
-   ./backup_setup.sh
+   sudo ./backup_setup.sh
    ```
 
    * Answer prompts for USB device, mount path, repo path, backup source, passphrase, and daily backup time.
@@ -144,18 +147,12 @@ auto_backup/
    sudo journalctl -u auto_backup.service -n 50
    ```
 
-3. **Stop automation**:
+3. **Remove automation setup**:
 
    ```bash
-   ./backup_stop.sh
+   sudo ./backup_remove.sh
    ```
-
-4. **Stop and remove automation** (optional):
-
-   ```bash
-   ./backup_stop.sh --remove
-   ```
-
+   
 ---
 
 ### Manual Systemd Setup (Optional)
