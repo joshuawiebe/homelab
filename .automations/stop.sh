@@ -3,6 +3,9 @@ set -euo pipefail
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
+# --- Script directory ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Detect running reverse proxy automatically
 PROXY_SERVICE=""
 if docker ps --format '{{.Names}}' | grep -q "^traefik$"; then
@@ -30,10 +33,10 @@ if [ -n "$PROXY_SERVICE" ]; then
 fi
 
 for svc in "${SERVICES[@]}"; do
-    SERVICE_FILE="./services/$svc/docker-compose.yml"
-    if [ -f "$SERVICE_FILE" ]; then
+    service_path="$SCRIPT_DIR/../services/$svc"
+    if [ -f "$service_path/docker-compose.yml" ]; then
         log "Stopping $svc..."
-        docker compose -f "$SERVICE_FILE" down || log "Warning: failed to stop $svc"
+        docker compose -f "$service_path/docker-compose.yml" down || log "Warning: failed to stop $svc"
     else
         log "Skipping $svc: docker-compose.yml not found"
     fi
