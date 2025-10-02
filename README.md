@@ -56,7 +56,7 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 │   ├── vaultwarden/
 │   ├── watchtower/
 │   └── traefik/
-├── auto_backup/            # New Borg backup automation
+├── auto_backup/            # Borg backup automation
 │   ├── backup_setup.sh
 │   ├── backup_start.sh
 │   ├── backup_stop.sh
@@ -92,11 +92,12 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 ### `start.sh`
 
 * Starts services in correct order
-* Prompts to choose reverse proxy (Traefik or Zoraxy)
+* Automatically detects reverse proxy (Traefik or Zoraxy)
 
 ### `stop.sh`
 
 * Stops all services safely in reverse order
+* Automatically detects reverse proxy
 
 ---
 
@@ -117,11 +118,12 @@ auto_backup/
 
 ### Features
 
-* Interactive setup: USB label, mount path, source path, repo path, passphrase, backup time
+* Interactive setup: USB device, mount path, source path, repo path, passphrase, backup time
 * Daily backups with pruning (keep last 7 daily by default)
 * Logs stored on the USB drive
 * Systemd timer ensures automatic execution
 * Stop or fully remove automation with `backup_stop.sh`
+* Automatically detects reverse proxy via `.automations/start.sh` and `.automations/stop.sh`
 
 ### Setup & Usage
 
@@ -132,14 +134,14 @@ auto_backup/
    ./backup_setup.sh
    ```
 
-   * Answer prompts for USB label, mount path, repo path, backup source, passphrase, and daily backup time.
+   * Answer prompts for USB device, mount path, repo path, backup source, passphrase, and daily backup time.
    * Generates `.env` file and systemd service/timer.
 
 2. **Test backup manually**:
 
    ```bash
-   systemctl start auto_backup.service
-   journalctl -u auto_backup.service -n 50
+   sudo systemctl start auto_backup.service
+   sudo journalctl -u auto_backup.service -n 50
    ```
 
 3. **Stop automation**:
@@ -152,6 +154,58 @@ auto_backup/
 
    ```bash
    ./backup_stop.sh --remove
+   ```
+
+---
+
+### Manual Systemd Setup (Optional)
+
+If you prefer not to run `backup_setup.sh`, you can manually add the systemd service and timer:
+
+1. **Copy service file** to `/etc/systemd/system/auto_backup.service`:
+
+   ```ini
+   [Unit]
+   Description=Automatic Borg Backup
+
+   [Service]
+   Type=oneshot
+   EnvironmentFile=/full/path/to/auto_backup/.env
+   ExecStart=/full/path/to/auto_backup/backup_start.sh
+   ```
+
+1. **Copy timer file** to `/etc/systemd/system/auto_backup.timer`:
+
+   ```ini
+   [Unit]
+   Description=Run automatic backup daily at 02:00:00
+
+   [Timer]
+   OnCalendar=*-*-* 02:00:00
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   ```
+
+1. **Enable timer**:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now auto_backup.timer
+   ```
+
+1. **Check status**:
+
+   ```bash
+   sudo systemctl status auto_backup.timer
+   sudo journalctl -u auto_backup.service -n 50
+   ```
+
+1. **Manually run backup**:
+
+   ```bash
+   sudo systemctl start auto_backup.service
    ```
 
 ---
@@ -211,10 +265,10 @@ docker run --rm -it vaultwarden/server /vaultwarden hash
 * Modular design allows easy addition of new services
 * Traefik handles all HTTPS termination and routing
 * Internal services communicate via proxy network
+* Auto backup is fully automated and integrates reverse proxy detection
 
 ---
 
 ## License
 
 MIT — free to use, adapt, and learn from. Do not commit live credentials.
-

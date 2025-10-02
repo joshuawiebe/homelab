@@ -14,34 +14,27 @@ else
     exit 1
 fi
 
-# Use log file
+# Logging
 exec >> "$LOG_FILE" 2>&1
-
 echo "===== Backup started at $(date) ====="
 
-# --- 0. Stop HomeLab Docker services ---
+# --- Stop HomeLab services ---
 echo "[INFO] Stopping HomeLab services..."
-SERVICES=("uptime_kuma" "gotify" "adguard_home" "vaultwarden" "nextcloud" "$PROXY_SERVICE")
+"$SCRIPT_DIR/../.automations/stop.sh"
 
-for svc in "${SERVICES[@]}"; do
-    SERVICE_FILE="../services/$svc/docker-compose.yml"
-    if [ -f "$SERVICE_FILE" ]; then
-        echo "[INFO] Stopping $svc..."
-        docker compose -f "$SERVICE_FILE" down || echo "[WARN] Failed to stop $svc"
-    else
-        echo "[INFO] Skipping $svc: docker-compose.yml not found"
-    fi
-done
+# --- Mount USB ---
+if ! mountpoint -q "$BACKUP_MOUNT"; then
+    echo "[INFO] Mounting USB drive..."
+    sudo mount "$USB_DEVICE" "$BACKUP_MOUNT"
+else
+    echo "[INFO] USB drive already mounted"
+fi
 
-# --- 1. Mount USB ---
-echo "[INFO] Mounting USB drive..."
-sudo mount "$USB_DEVICE" "$BACKUP_MOUNT"
-
-# --- 2. Prune old backups (pre) ---
+# --- Prune old backups (pre) ---
 echo "[INFO] Pruning old backups (pre)..."
 borg prune -v --list "$BORG_REPO" --keep-last 3 || true
 
-# --- 3. Create backup ---
+# --- Create backup ---
 echo "[INFO] Creating new backup..."
 borg create \
     --stats \
@@ -49,15 +42,15 @@ borg create \
     "$BORG_REPO::backup-$(date +%F-%H%M%S)" \
     "$BACKUP_SRC"
 
-# --- 4. Prune old backups (post) ---
+# --- Prune old backups (post) ---
 echo "[INFO] Pruning old backups (post)..."
 borg prune -v --list "$BORG_REPO" --keep-last 3 || true
 
-# --- 5. Unmount USB ---
+# --- Unmount USB ---
 echo "[INFO] Unmounting USB drive..."
-sudo umount "$BACKUP_MOUNT"
+sudo umount "$BACKUP_MOUNT" || echo "[WARN] Failed to unmount USB"
 
-# --- 6. Restart HomeLab Docker services ---
+# --- Restart HomeLab services ---
 echo "[INFO] Starting HomeLab services..."
 "$SCRIPT_DIR/../.automations/start.sh"
 

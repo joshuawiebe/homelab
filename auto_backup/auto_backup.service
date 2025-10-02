@@ -1,0 +1,7 @@
+[Unit]
+Description=Automatic Borg Backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=/path/to/auto_backup/.env
+ExecStart=/path/to/auto_backup/backup_start.sh

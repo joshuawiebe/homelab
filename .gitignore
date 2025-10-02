@@ -19,6 +19,10 @@ services/vaultwarden/vw-data/
 services/zoraxy/config/
 services/zoraxy/plugin/
 
+# Ignore auto_backup .env and logs
+auto_backup/.env
+auto_backup/backup.log
+
 # Ignore database files
 *.db
 *.db-shm
