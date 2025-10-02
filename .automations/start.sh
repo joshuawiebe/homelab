@@ -3,6 +3,9 @@ set -euo pipefail
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
+# --- Script directory ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Default values
 PROXY_SERVICE=""
 
@@ -53,7 +56,7 @@ services_order=(
 )
 
 for service in "${services_order[@]}"; do
-    service_path="./services/$service"
+    service_path="$SCRIPT_DIR/../services/$service"
     if [ -d "$service_path" ]; then
         log "Starting $service..."
         docker compose -f "$service_path/docker-compose.yml" up -d
