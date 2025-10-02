@@ -4,16 +4,16 @@ set -euo pipefail
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
 # Detect running reverse proxy automatically
+PROXY_SERVICE=""
 if docker ps --format '{{.Names}}' | grep -q "^traefik$"; then
     PROXY_SERVICE="traefik"
 elif docker ps --format '{{.Names}}' | grep -q "^zoraxy$"; then
     PROXY_SERVICE="zoraxy"
 else
-    log "No reverse proxy container detected (traefik or zoraxy). Exiting."
-    exit 1
+    log "No reverse proxy container detected (traefik or zoraxy). Continuing without proxy."
 fi
 
-log "Stopping HomeLab services with proxy: $PROXY_SERVICE"
+log "Stopping HomeLab services..."
 
 SERVICES=(
     "adguard_home"
@@ -22,8 +22,12 @@ SERVICES=(
     "uptime_kuma"
     "vaultwarden"
     "watchtower"
-    "$PROXY_SERVICE"
 )
+
+# Add proxy if detected
+if [ -n "$PROXY_SERVICE" ]; then
+    SERVICES+=("$PROXY_SERVICE")
+fi
 
 for svc in "${SERVICES[@]}"; do
     SERVICE_FILE="./services/$svc/docker-compose.yml"
