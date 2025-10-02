@@ -9,7 +9,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+# Load config
 source "$ENV_FILE"
+
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
 
@@ -28,4 +30,7 @@ if [[ "$REMOVE_ENV" =~ ^[Yy]$ ]]; then
   echo "[INFO] Removed $ENV_FILE"
 fi
 
-echo "[INFO] Auto backup stopped and cleaned up."
+echo "[INFO] Auto backup automation removed successfully."
+echo "[INFO] Please remember to manually delete any backup files if needed."
+echo "[INFO] To re-enable the service, run the setup script again."
+echo "========================================="
