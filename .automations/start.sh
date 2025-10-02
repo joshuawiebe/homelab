@@ -3,24 +3,45 @@ set -euo pipefail
 
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
-# Detect running reverse proxy automatically
-if docker ps --format '{{.Names}}' | grep -q "^traefik$"; then
-    PROXY_SERVICE="traefik"
-elif docker ps --format '{{.Names}}' | grep -q "^zoraxy$"; then
-    PROXY_SERVICE="zoraxy"
+# Default values
+PROXY_SERVICE=""
+
+# --- CLI args ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --proxy)
+            PROXY_SERVICE="$2"
+            shift 2
+            ;;
+        *)
+            echo "Usage: $0 [--proxy traefik|zoraxy]"
+            exit 1
+            ;;
+    esac
+done
+
+# --- Proxy detection ---
+if [ -n "$PROXY_SERVICE" ]; then
+    log "Using proxy from flag: $PROXY_SERVICE"
 else
-    log "No reverse proxy container detected (traefik or zoraxy). Exiting."
-    exit 1
+    if docker ps --format '{{.Names}}' | grep -q "^traefik$"; then
+        PROXY_SERVICE="traefik"
+    elif docker ps --format '{{.Names}}' | grep -q "^zoraxy$"; then
+        PROXY_SERVICE="zoraxy"
+    else
+        log "No reverse proxy container detected (traefik or zoraxy). Exiting."
+        exit 1
+    fi
+    log "Auto-detected proxy: $PROXY_SERVICE"
 fi
 
-log "Detected reverse proxy: $PROXY_SERVICE"
-
-# Ensure proxy network exists
+# --- Create network if missing ---
 if ! docker network inspect proxy >/dev/null 2>&1; then
     docker network create proxy
     log "Created proxy network"
 fi
 
+# --- Start services in order ---
 services_order=(
     "$PROXY_SERVICE"
     "adguard_home"

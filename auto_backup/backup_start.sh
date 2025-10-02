@@ -52,6 +52,6 @@ sudo umount "$BACKUP_MOUNT" || echo "[WARN] Failed to unmount USB"
 
 # --- Restart HomeLab services ---
 echo "[INFO] Starting HomeLab services..."
-"$SCRIPT_DIR/../.automations/start.sh"
+"$SCRIPT_DIR/../.automations/start.sh" --proxy "$DEFAULT_PROXY"
 
 echo "===== Backup finished at $(date) ====="

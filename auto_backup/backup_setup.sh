@@ -17,6 +17,8 @@ read -rp "Enter daily backup time (default: 02:00:00): " BACKUP_TIME
 BACKUP_TIME=${BACKUP_TIME:-02:00:00}
 read -rp "Enter systemd service name (default: auto-backup): " SERVICE_NAME
 SERVICE_NAME=${SERVICE_NAME:-auto-backup}
+read -rp "Enter default reverse proxy (traefik/zoraxy, default: traefik): " DEFAULT_PROXY
+DEFAULT_PROXY=${DEFAULT_PROXY:-traefik}
 
 # Save to .env
 cat > "$ENV_FILE" <<EOF
@@ -31,6 +33,7 @@ BORG_PASSPHRASE=$BORG_PASSPHRASE
 LOG_FILE=$SCRIPT_DIR/backup.log
 BACKUP_TIME=$BACKUP_TIME
 SERVICE_NAME=$SERVICE_NAME
+DEFAULT_PROXY=$DEFAULT_PROXY
 EOF
 
 echo "[INFO] Configuration saved to $ENV_FILE"
@@ -70,4 +73,6 @@ echo "You can check the status with: sudo systemctl status $SERVICE_NAME.timer"
 echo "To see logs: journalctl -u $SERVICE_NAME.service"
 echo "To manually run the backup: sudo systemctl start $SERVICE_NAME.service"
 echo "To remove this setup run the cleanup script: $SCRIPT_DIR/backup_remove.sh"
+echo "========================="
+echo "Auto Backup Setup Finished"
 echo "========================="

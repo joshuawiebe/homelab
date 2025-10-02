@@ -95,12 +95,13 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 ### `start.sh`
 
 * Starts services in correct order
-* Automatically detects reverse proxy (Traefik or Zoraxy)
+* Detects reverse proxy automatically (**Traefik or Zoraxy**)
+* **New:** Accepts `--proxy` flag for automated runs (used by backup scripts)
 
 ### `stop.sh`
 
 * Stops all services safely in reverse order
-* Automatically detects reverse proxy
+* Detects reverse proxy automatically
 
 ---
 
@@ -108,6 +109,7 @@ All services run in a shared Docker network called `proxy`. Routing and TLS are 
 
 The `auto_backup/` folder provides a fully automated **daily backup system** using **Borg**.
 Backups run on a USB drive, prune old archives, and log activity.
+No user interaction is required — services are stopped, backup is taken, then services are restarted automatically.
 
 ### Folder structure
 
@@ -115,44 +117,53 @@ Backups run on a USB drive, prune old archives, and log activity.
 auto_backup/
 ├── backup_setup.sh      # Interactive setup, generates .env, systemd service/timer
 ├── backup_start.sh      # Runs the backup based on .env config
-├── backup_remove.sh     # removes the setup of this automation
-├── .env.sample          # Sample configuration
+├── backup_remove.sh     # Removes backup automation
+├── .env.sample          # Example config for manual setup
 ```
 
 ### Features
 
-* Interactive setup: USB device, mount path, source path, repo path, passphrase, backup time
-* Daily backups with pruning (keep last 7 daily by default)
-* Logs stored on the USB drive
-* Systemd timer ensures automatic execution
-* Remove automation setup with `backup_remove.sh`
-* Automatically detects reverse proxy via `.automations/start.sh` and `.automations/stop.sh`
+* Automated service stop/start (reverse proxy detected automatically)
+* **Automated proxy selection**: uses `DEFAULT_PROXY` from `.env` or `--proxy` flag
+* USB mount/unmount handled automatically
+* Daily Borg backups with pruning (default: keep last 7 archives)
+* Detailed logging to file
+* Systemd timer ensures execution without user interaction
+* Manual removal with `backup_remove.sh`
+
+**Note:** You can also use a remote Borg repo (over SSH), e.g. `user@host:/path/to/repo`.
+
+---
 
 ### Setup & Usage
 
-1. **Run setup**:
+1. **Run setup** (recommended):
 
    ```bash
    cd auto_backup
    sudo ./backup_setup.sh
    ```
 
-   * Answer prompts for USB device, mount path, repo path, backup source, passphrase, and daily backup time.
-   * Generates `.env` file and systemd service/timer.
+   This generates `.env`, a systemd service, and a timer.
+   During setup you can choose the default proxy (`traefik` or `zoraxy`) for automated runs.
 
-2. **Test backup manually**:
+2. **Manual setup** (optional):
+
+   If you don’t want to use the script, copy `.env.sample` to `.env` and edit values, then configure systemd manually (see below).
+
+3. **Test a backup manually**:
 
    ```bash
    sudo systemctl start auto_backup.service
    sudo journalctl -u auto_backup.service -n 50
    ```
 
-3. **Remove automation setup**:
+4. **Remove automation**:
 
    ```bash
    sudo ./backup_remove.sh
    ```
-   
+
 ---
 
 ### Manual Systemd Setup (Optional)
@@ -171,7 +182,7 @@ If you prefer not to run `backup_setup.sh`, you can manually add the systemd ser
    ExecStart=/full/path/to/auto_backup/backup_start.sh
    ```
 
-1. **Copy timer file** to `/etc/systemd/system/auto_backup.timer`:
+2. **Copy timer file** to `/etc/systemd/system/auto_backup.timer`:
 
    ```ini
    [Unit]
@@ -185,21 +196,21 @@ If you prefer not to run `backup_setup.sh`, you can manually add the systemd ser
    WantedBy=timers.target
    ```
 
-1. **Enable timer**:
+3. **Enable timer**:
 
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable --now auto_backup.timer
    ```
 
-1. **Check status**:
+4. **Check status**:
 
    ```bash
    sudo systemctl status auto_backup.timer
    sudo journalctl -u auto_backup.service -n 50
    ```
 
-1. **Manually run backup**:
+5. **Manually run backup**:
 
    ```bash
    sudo systemctl start auto_backup.service
@@ -212,6 +223,7 @@ If you prefer not to run `backup_setup.sh`, you can manually add the systemd ser
 * `.env.template` files hold placeholders
 * `config.sh` creates `.env` files with secure values
 * `auto_backup/.env` stores backup-specific config (USB, repo, schedule, passphrase)
+* `DEFAULT_PROXY` added for automated backup runs
 * Do **not** commit `.env` files containing secrets
 
 ---
@@ -262,7 +274,7 @@ docker run --rm -it vaultwarden/server /vaultwarden hash
 * Modular design allows easy addition of new services
 * Traefik handles all HTTPS termination and routing
 * Internal services communicate via proxy network
-* Auto backup is fully automated and integrates reverse proxy detection
+* Auto backup is fully automated, integrates **reverse proxy detection**, and supports `DEFAULT_PROXY` for non-interactive runs
 
 ---
 
