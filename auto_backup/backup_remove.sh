@@ -1,36 +1,72 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Source shared logging module
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$SCRIPT_DIR")/../.shared/log.sh" 2>/dev/null || {
+  echo "[ERROR] Failed to load logging module"
+  exit 1
+}
+
 ENV_FILE="$SCRIPT_DIR/.env"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[ERROR] No .env file found in $SCRIPT_DIR"
+section "HomeLab Auto Backup Removal"
+
+# Check if configured
+if [ ! -f "$ENV_FILE" ]; then
+  error "No .env file found - auto backup not configured"
+  echo "Nothing to remove."
   exit 1
 fi
 
-# Load config
+# Load config to get service name
 source "$ENV_FILE"
 
-SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-TIMER_FILE="/etc/systemd/system/$SERVICE_NAME.timer"
+subsection "Removing Auto Backup Service"
 
-echo "[INFO] Stopping and disabling $SERVICE_NAME.timer..."
-sudo systemctl disable --now "$SERVICE_NAME.timer" || true
+info "Service name: $SERVICE_NAME"
+info "Configuration file: $ENV_FILE"
+echo ""
 
-echo "[INFO] Removing systemd unit files..."
-sudo rm -f "$SERVICE_FILE" "$TIMER_FILE"
+# Confirm removal
+if ! confirm "Are you sure you want to remove the backup automation"; then
+  warn "Removal cancelled"
+  exit 0
+fi
+echo ""
 
-echo "[INFO] Reloading systemd..."
+# Remove service files
+info "Stopping and disabling timer..."
+sudo systemctl disable --now "$SERVICE_NAME.timer" 2>/dev/null || warn "Timer was not active"
+success "Timer disabled"
+
+info "Removing systemd unit files..."
+sudo rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+sudo rm -f "/etc/systemd/system/$SERVICE_NAME.timer"
+success "Unit files removed"
+
+info "Reloading systemd..."
 sudo systemctl daemon-reload
+success "Systemd reloaded"
 
-read -rp "Do you also want to remove $ENV_FILE? [y/N]: " REMOVE_ENV
-if [[ "$REMOVE_ENV" =~ ^[Yy]$ ]]; then
+echo ""
+subsection "Cleanup Options"
+
+# Ask about removing config
+if confirm "Remove configuration file ($ENV_FILE)"; then
   rm -f "$ENV_FILE"
-  echo "[INFO] Removed $ENV_FILE"
+  success "Configuration file removed"
+else
+  info "Keeping configuration file for future reference"
 fi
 
-echo "[INFO] Auto backup automation removed successfully."
-echo "[INFO] Please remember to manually delete any backup files if needed."
-echo "[INFO] To re-enable the service, run the setup script again."
-echo "========================================="
+echo ""
+separator_thick
+
+info "Backup automation has been removed successfully"
+info "Backup files are NOT automatically deleted"
+info "To re-enable, run: $SCRIPT_DIR/backup_setup.sh"
+echo ""
+
+exit_success "Removal complete!"
+
