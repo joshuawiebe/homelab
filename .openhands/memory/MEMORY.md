@@ -4,9 +4,12 @@
 - Docker Compose stack, one folder per service under `services/`: traefik, nextcloud, vaultwarden,
   adguard_home, gotify, uptime_kuma, watchtower, zoraxy.
 - `bin/homelab` is the single entry point: a ~1200-line, stdlib-only Python 3.11+ CLI
-  (up/down/restart/status/logs/urls/config/doctor/snapshot/install).
+  (up/down/restart/status/logs/urls/config/doctor/snapshot/provision/install).
   `.automations/*.sh` are 3-line shims; `auto_backup/` was deleted as superseded.
-- Tests: `python3 -m unittest discover -s tests` — 34 tests, no docker daemon needed.
+- Tests: `python3 -m unittest discover -s tests` — 56 tests, no docker daemon needed.
+- Two hosts, one CLI: `[hosts.nuc]` / `[hosts.pi]` in `homelab.toml`, Pi stack under
+  `hosts/pi/services/`. `--host NAME` filters; `HOMELAB_CONF` swaps the whole config.
+- `docs/PLAN.md` is the topology + runbook (Proxmox VM, md/LVM repo, restic copies).
 
 ## Facts that were expensive to learn
 - `docker compose -f X config` validates YAML **without** a running daemon. Used as the
@@ -30,3 +33,12 @@
 - Pi 5: microSD OS (flagged: weakest link), several SSD/HDD to be pooled. Intended restic
   target with a pull model, plus AdGuard/alerting. Offsite: Hetzner Storage Box.
 - Preferences: CLI-driven tooling, minimal dependencies, no invented image tags.
+
+## Gotchas added with the two-host work
+- Compose `profiles:` services are invisible to a plain `up`; the CLI skips them with a
+  notice unless `--profile NAME` is passed, and passes it through to compose.
+- `--dry-run` must not skip read-only probes (`Shell.probe`), otherwise `provision --dry-run`
+  reports every device as present and every step as already done.
+- Doctor counts only `${VAR}` references *without* a default as "needs .env"; otherwise a
+  compose file that defaults every variable looks like it is missing its env file.
+- Hetzner Storage Box SFTP listens on port 23, and restic's URL carries it: `:23//path`.
