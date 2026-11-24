@@ -1,25 +1,39 @@
 # homelab.toml - settings for the `homelab` CLI. Copy to homelab.toml and edit.
 # Nothing here is secret: secrets live in services/*/.env and in password files.
+#
+# The Pi 5 has its own file: hosts/pi/homelab.toml (different service set, and it
+# owns the snapshot repository).
 
 [general]
 # Reverse proxy to start. Both publish 80/443, so only one may run.
 proxy = "traefik"
-# Where container state should live. Anything here is backed up; the git tree is not.
+# Where the compose files live. The Pi overrides this to hosts/pi/services.
+services_dir = "services"
+# Where container state should live. Anything here is snapshotted; the git tree is not.
 data_dir = "/srv/homelab"
 # Start order. The proxy always goes first; unlisted services follow alphabetically.
-order = ["adguard_home", "gotify", "nextcloud", "vaultwarden", "uptime_kuma", "watchtower"]
+order = ["adguard_home", "nextcloud", "vaultwarden", "watchtower"]
+
+# Which services run where. `homelab --host nuc up` starts exactly this list.
+[hosts.nuc]
+services = ["traefik", "adguard_home", "nextcloud", "vaultwarden", "watchtower"]
+
+[hosts.pi]
+services_dir = "hosts/pi/services"
+services = ["adguard_home", "uptime_kuma", "gotify"]
 
 [snapshot]
 tool = "restic"                                  # restic | borg
 repo = "/srv/repo/restic"                        # local repo on the Pi (pull model)
 password_file = "/etc/homelab/restic.password"   # mode 600, root-only
-source = "/srv/mnt/nuc/srv/homelab"              # sshfs/rsync staging dir, or the local data_dir
+source = "/srv/mnt/nuc/srv/homelab"              # staging mount of the NUC, or the local data_dir
 exclude = ["**/cache", "**/*.tmp", "**/logs"]
 keep_daily = 7
 keep_weekly = 4
 keep_monthly = 6
 check_subset = "5%"                              # restic --read-data-subset for weekly verify
 schedule = "*-*-* 02:30:00"
+copy = false                                     # set true to run the copies after each snapshot
 
 # Commands run before the snapshot (on the source host with --remote HOST).
 # These keep databases consistent without stopping the stack.
@@ -33,6 +47,24 @@ pre = [
 healthcheck_url = ""
 gotify_url = ""
 gotify_token = ""
+
+# Replicas: `homelab snapshot copy` pushes the repo to each of these.
+# [[snapshot.copies]]
+# name = "cold"
+# repo = "/srv/cold/restic"
+# password_file = "/etc/homelab/restic-cold.password"
+# keep_daily = 14
+# keep_weekly = 8
+# keep_monthly = 12
+#
+# [[snapshot.copies]]
+# name = "offsite"
+# repo = "sftp:u123456@u123456.your-storagebox.de:/restic"
+# password_file = "/etc/homelab/restic-offsite.password"
+# limit_upload = 30000                           # KiB/s, keeps your uplink usable
+# keep_daily = 14
+# keep_weekly = 8
+# keep_monthly = 12
 
 # borg only: file containing the passphrase (BORG_PASSCOMMAND)
 # passphrase_file = "/etc/homelab/borg.passphrase"

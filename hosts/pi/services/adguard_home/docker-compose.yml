@@ -1,0 +1,15 @@
+# Pi variant of AdGuard Home: LAN DNS only, no reverse proxy, no TLS.
+# Host networking is required so it can own port 53 on the LAN address.
+# The admin UI therefore listens on http://<pi>:3000.
+services:
+  adguard_home:
+    image: ${ADGUARD_IMAGE:-adguard/adguardhome:latest}
+    container_name: adguard_home
+    hostname: adguard_home
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${DATA_DIR:-/srv/homelab}/adguard/work:/opt/adguardhome/work
+      - ${DATA_DIR:-/srv/homelab}/adguard/conf:/opt/adguardhome/conf
+    environment:
+      - TZ=${TZ:-Europe/Berlin}

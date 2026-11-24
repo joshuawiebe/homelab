@@ -71,12 +71,18 @@ homelab config --non-interactive
 | `homelab urls` | print each service's public URL from its `.env` |
 | `homelab logs SERVICE [-f] [-n N]` | tail one service |
 | `homelab snapshot run` | pre-hooks, snapshot, retention, verify, notify |
+| `homelab snapshot copy [--only NAME]` | replicate to each `[[snapshot.copies]]` target |
 | `homelab snapshot list / verify / stats` | inspect the repository |
 | `homelab snapshot extract SNAP DIR [--include PATH]` | put files back |
 | `homelab snapshot install / uninstall` | systemd timer for the nightly run |
+| `homelab provision pi [--apply] [--yes]` | build the mirrored repo on the Pi |
 | `homelab install [--prefix DIR]` | symlink the CLI into `PATH` |
 
-Global flags: `--root DIR`, `--conf FILE`, `--verbose`, `--version`.
+Global flags: `--root DIR`, `--host NAME`, `--conf FILE`, `--verbose`, `--version`.
+
+`--host` limits everything to one host's service list (`[hosts.nuc]` in `homelab.toml`),
+so `homelab --host nuc up` starts exactly what runs on the NUC and nothing else.
+`HOMELAB_CONF` works instead of `--conf`, which is how the Pi keeps its own file.
 
 `--dry-run` prints the exact `docker`/`restic` commands without running them. Use it
 when you are unsure; it is also what the test suite asserts against.
@@ -100,6 +106,9 @@ Ordered from "will not boot" to "smells":
 * `docker.sock` mounted read-write (root-equivalent)
 * container state living inside the git tree
 * free space on `data_dir` and the snapshot repo
+* snapshot repo: present and mounted, newest snapshot younger than 36 hours, and every
+  `[[snapshot.copies]]` target fresh — a backup that stopped three weeks ago is the most
+  common homelab failure and the hardest to notice
 
 Exit code is 1 on any `FAIL`, so it is safe to run from cron or a deploy script.
 
@@ -175,6 +184,30 @@ Retention and verification defaults: `keep-daily 7`, `keep-weekly 4`,
 stopped three weeks ago is the most common homelab failure, and that ping is the only
 thing that catches it.
 
+### Copies
+
+`[[snapshot.copies]]` adds replicas. `homelab snapshot copy` runs `restic copy --repo2` to
+each target and prunes it on its own retention, so the offsite copy can be longer-lived than
+the primary:
+
+```toml
+[[snapshot.copies]]
+name = "cold"
+repo = "/srv/cold/restic"                     # separate HDD on the Pi
+password_file = "/etc/homelab/restic-cold.password"
+keep_daily = 14
+
+[[snapshot.copies]]
+name = "offsite"
+repo = "sftp:u123456@u123456.your-storagebox.de:23//restic"
+password_file = "/etc/homelab/restic-offsite.password"
+limit_upload = 30000                          # KiB/s, keeps your uplink usable
+```
+
+`copy = true` under `[snapshot]` runs the copies at the end of every `snapshot run`.
+Use a different passphrase per repository, and keep those passphrases somewhere that is not
+these machines.
+
 Test a recovery every few months:
 
 ```bash
@@ -209,11 +242,20 @@ homelab/
 ├── completions/homelab.bash
 ├── install.sh
 ├── homelab.toml.example
-├── services/
+├── docs/PLAN.md                 # hardware, phases, runbooks, failure modes
+├── services/                    # what runs on the NUC
 │   └── <name>/docker-compose.yml + .env.template
+├── hosts/pi/                    # what runs on the Pi
+│   ├── homelab.toml             # services_dir, provision, snapshot targets
+│   └── services/<name>/docker-compose.yml
 ├── tests/test_homelab.py        # python3 -m unittest discover -s tests
 └── .automations/                # thin shims that exec the CLI
 ```
+
+Two hosts, two stacks, one CLI. The Pi's services are separate compose files on purpose:
+AdGuard there needs host networking and port 53, not Traefik labels, and its UI belongs on
+the LAN. `docs/PLAN.md` explains the whole topology, including the Proxmox VM and the
+three-copy backup chain.
 
 Container state must live outside the checkout (for example `/srv/homelab/nextcloud`),
 otherwise `git clean -xfd` deletes your data with the rest of the untracked files.
@@ -226,10 +268,12 @@ otherwise `git clean -xfd` deletes your data with the rest of the untracked file
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers env parsing, ordering, dry-run command construction, every doctor
-check (including the resolver and unset-variable regressions), config generation, and
-restic command building. It needs no running docker daemon — `docker compose config`
-is used only to validate YAML when docker is present.
+53 tests covering env parsing, ordering, dry-run command construction, host filtering,
+every doctor check (including the resolver and unset-variable regressions), config
+generation, restic/borg command building, the copy chain, and the Pi provisioning
+guardrails (a mounted disk, a disk with a filesystem on it, and the root device must all be
+refused). It needs no running docker daemon — `docker compose config` is used only to
+validate YAML when docker is present.
 
 ---
 

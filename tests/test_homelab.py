@@ -361,8 +361,267 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("usage", err)
 
 
+class HostTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE, "app": APP_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+
+    def test_host_limits_the_service_set(self):
+        (self.repo.dir / "homelab.toml").write_text('[hosts.nuc]\nservices = ["app"]\n')
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "--host", "nuc", "doctor", "--json"]
+        )
+        self.assertEqual(code, 1)  # no env files yet, but the failure must be about app
+        names = [check["name"] for check in __import__("json").loads(out)]
+        self.assertIn("app env", names)
+        self.assertNotIn("edge env", names)
+
+    def test_unknown_host_lists_what_is_configured(self):
+        (self.repo.dir / "homelab.toml").write_text('[hosts.nuc]\nservices = ["app"]\n')
+        code, _, err = run_cli(["--root", str(self.repo.dir), "--host", "pi", "status"])
+        self.assertEqual(code, 1)
+        self.assertIn("unknown host: pi", err)
+        self.assertIn("nuc", err)
+
+    def test_host_can_point_at_another_service_dir(self):
+        alt = self.repo.dir / "pi" / "services" / "kuma"
+        alt.mkdir(parents=True)
+        (alt / "docker-compose.yml").write_text(
+            'services:\n  kuma:\n    image: ${KUMA_IMAGE:-louislam/uptime-kuma:latest}\n'
+            '    ports:\n      - "3001:3001"\n'
+        )
+        (self.repo.dir / "homelab.toml").write_text(
+            '[hosts.pi]\nservices_dir = "pi/services"\nservices = ["kuma"]\n'
+        )
+        code, out, _ = run_cli(["--root", str(self.repo.dir), "--host", "pi", "doctor", "--json"])
+        names = [check["name"] for check in __import__("json").loads(out)]
+        self.assertIn("kuma env", names)
+        self.assertNotIn("edge env", names)
+        # a host with no proxy must not be nagged about TLS resolvers
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["tls resolver"]["status"], "SKIP")
+
+    def test_host_service_typo_is_caught(self):
+        (self.repo.dir / "homelab.toml").write_text('[hosts.nuc]\nservices = ["ap"]\n')
+        code, _, err = run_cli(["--root", str(self.repo.dir), "--host", "nuc", "status"])
+        self.assertEqual(code, 1)
+        self.assertIn("unknown service(s): ap", err)
+
+
+class CopyTests(unittest.TestCase):
+    TOML = (
+        '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
+        'password_file = "/etc/homelab/pw"\nsource = "/srv/homelab"\n'
+        "[[snapshot.copies]]\n"
+        'name = "cold"\nrepo = "/srv/cold/restic"\n'
+        'password_file = "/etc/homelab/cold.pw"\nkeep_daily = 14\n'
+        "[[snapshot.copies]]\n"
+        'name = "offsite"\nrepo = "sftp:u1@u1.your-storagebox.de:/restic"\n'
+        'password_file = "/etc/homelab/off.pw"\nlimit_upload = 30000\n'
+    )
+
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        (self.repo.dir / "homelab.toml").write_text(self.TOML)
+
+    def test_every_copy_target_gets_a_restic_copy(self):
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "snapshot", "copy", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("copy --repo2 /srv/cold/restic --password-file2 /etc/homelab/cold.pw", out)
+        self.assertIn("copy --repo2 sftp:u1@u1.your-storagebox.de:/restic", out)
+        self.assertIn("--limit-upload 30000", out)
+        self.assertIn("forget --keep-daily 14", out)
+
+    def test_only_limits_the_targets(self):
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "snapshot", "copy", "--only", "cold", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("/srv/cold/restic", out)
+        self.assertNotIn("storagebox", out)
+
+    def test_unknown_target_is_an_error(self):
+        code, _, err = run_cli(
+            ["--root", str(self.repo.dir), "snapshot", "copy", "--only", "nope", "--dry-run"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("unknown copy target: nope", err)
+
+    def test_no_copies_configured_is_explained(self):
+        (self.repo.dir / "homelab.toml").write_text('[snapshot]\nrepo = "/srv/repo/restic"\n')
+        code, _, err = run_cli(["--root", str(self.repo.dir), "snapshot", "copy"])
+        self.assertEqual(code, 1)
+        self.assertIn("no [[snapshot.copies]]", err)
+
+    def test_borg_copy_says_why_it_cannot(self):
+        (self.repo.dir / "homelab.toml").write_text(
+            self.TOML.replace('tool = "restic"', 'tool = "borg"')
+        )
+        code, _, err = run_cli(["--root", str(self.repo.dir), "snapshot", "copy", "--dry-run"])
+        self.assertEqual(code, 1)
+        self.assertIn("borg cannot copy", err)
+
+
+class FakeShell:
+    """Answers canned command results; records what was asked."""
+
+    def __init__(self, answers=None):
+        self.answers = answers or {}
+        self.calls = []
+        self.dry_run = False
+        self.verbose = False
+
+    def run(self, args, check=True, capture=True, env=None, cwd=None):
+        key = " ".join(args)
+        self.calls.append(key)
+        code, out = self.answers.get(key, (1, ""))
+        return homelab.Result(code, out, "")
+
+    def probe(self, args):
+        return self.run(args, check=False)
+
+
+class ProvisionTests(unittest.TestCase):
+    def stub(self, devices, answers=None):
+        from types import SimpleNamespace
+
+        conf = {"provision": {"pi": {"devices": devices, "mount": "/srv/repo"}}}
+        return SimpleNamespace(
+            conf=conf,
+            sh=FakeShell(answers),
+            args=SimpleNamespace(apply=False, yes=False),
+        )
+
+    def test_steps_cover_the_whole_chain(self):
+        steps = homelab.PiProvisioner(self.stub(["/dev/a", "/dev/b"])).steps()
+        cmds = [" ".join(step["cmd"]) if step.get("cmd") else "fstab" for step in steps]
+        joined = " | ".join(cmds)
+        for expected in (
+            "mdadm --create /dev/md/repo --level=1 --raid-devices=2 /dev/a /dev/b",
+            "vgcreate vg_repo /dev/md/repo",
+            "lvcreate -l 100%FREE -n lv_repo vg_repo",
+            "mkfs.ext4 -m 1 -L repo /dev/vg_repo/lv_repo",
+            "mkdir -p /srv/repo",
+            "mount /dev/vg_repo/lv_repo /srv/repo",
+        ):
+            self.assertIn(expected, joined)
+
+    def test_mount_is_persisted_before_it_is_mounted(self):
+        steps = homelab.PiProvisioner(self.stub(["/dev/a", "/dev/b"])).steps()
+        kinds = ["fstab" if step.get("fn") else step["cmd"][0] for step in steps]
+        self.assertLess(kinds.index("fstab"), kinds.index("mount"))
+
+    def test_two_devices_are_required(self):
+        with self.assertRaises(homelab.HomelabError):
+            homelab.PiProvisioner(self.stub(["/dev/only-one"])).run()
+
+    def test_clean_devices_pass(self):
+        answers = {
+            "findmnt -no SOURCE /": (0, "/dev/mmcblk0p2\n"),
+            "test -b /dev/sda": (0, ""),
+            "lsblk -no MOUNTPOINT /dev/sda": (0, ""),
+            "blkid -p -o value -s TYPE /dev/sda": (0, ""),
+        }
+        self.assertEqual(
+            homelab.validate_pi_devices(["/dev/sda"], FakeShell(answers)), []
+        )
+
+    def test_mounted_device_is_refused(self):
+        answers = {
+            "findmnt -no SOURCE /": (0, "/dev/mmcblk0p2\n"),
+            "test -b /dev/sda": (0, ""),
+            "lsblk -no MOUNTPOINT /dev/sda": (0, "/mnt/data\n"),
+            "blkid -p -o value -s TYPE /dev/sda": (0, ""),
+        }
+        problems = homelab.validate_pi_devices(["/dev/sda"], FakeShell(answers))
+        self.assertTrue(any("mounted at /mnt/data" in p for p in problems))
+
+    def test_device_with_a_signature_is_refused(self):
+        answers = {
+            "findmnt -no SOURCE /": (0, "/dev/mmcblk0p2\n"),
+            "test -b /dev/sda": (0, ""),
+            "lsblk -no MOUNTPOINT /dev/sda": (0, ""),
+            "blkid -p -o value -s TYPE /dev/sda": (0, "ext4\n"),
+        }
+        problems = homelab.validate_pi_devices(["/dev/sda"], FakeShell(answers))
+        self.assertTrue(any("wipefs -a /dev/sda" in p for p in problems))
+
+    def test_root_device_is_refused(self):
+        answers = {
+            "findmnt -no SOURCE /": (0, "/dev/sda\n"),
+            "test -b /dev/sda": (0, ""),
+            "lsblk -no MOUNTPOINT /dev/sda": (0, ""),
+            "blkid -p -o value -s TYPE /dev/sda": (0, ""),
+        }
+        problems = homelab.validate_pi_devices(["/dev/sda"], FakeShell(answers))
+        self.assertTrue(any("root filesystem" in p for p in problems))
+
+    def test_non_block_device_is_refused(self):
+        answers = {"findmnt -no SOURCE /": (0, "/dev/mmcblk0p2\n")}
+        problems = homelab.validate_pi_devices(["/dev/nope"], FakeShell(answers))
+        self.assertTrue(any("not a block device" in p for p in problems))
+
+
+class ProvisionCliTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+
+    def test_dry_run_refuses_devices_that_are_not_block_devices(self):
+        (self.repo.dir / "homelab.toml").write_text(
+            '[provision.pi]\ndevices = ["/dev/not-a-disk-1", "/dev/not-a-disk-2"]\n'
+        )
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "provision", "pi", "--dry-run"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("not a block device", out)
+        self.assertIn("mdadm --create", out)
+
+    def test_missing_devices_points_at_the_config(self):
+        code, _, err = run_cli(["--root", str(self.repo.dir), "provision", "pi", "--dry-run"])
+        self.assertEqual(code, 1)
+        self.assertIn("[provision.pi] devices", err)
+
+
+class ProfileTests(unittest.TestCase):
+    PROFILED = """services:
+  vpn:
+    image: ${VPN_IMAGE:-tailscale/tailscale:latest}
+    profiles: ["vpn"]
+    network_mode: host
+"""
+
+    def setUp(self):
+        self.repo = TempRepo({"app": APP_COMPOSE, "vpn": self.PROFILED})
+        self.addCleanup(self.repo.cleanup)
+
+    def test_profiled_service_is_skipped_by_default(self):
+        code, out, _ = run_cli(["--root", str(self.repo.dir), "up", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("skipping vpn", out)
+        self.assertNotIn("services/vpn/docker-compose.yml up", out)
+
+    def test_profile_flag_starts_it(self):
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "up", "--profile", "vpn", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("skipping vpn", out)
+        self.assertIn("--profile vpn up -d", out)
+
+    def test_service_profiles_reads_both_forms(self):
+        inline = self.repo.dir / "services" / "vpn" / "docker-compose.yml"
+        self.assertEqual(homelab.service_profiles(inline.parent), ["vpn"])
+        block = self.repo.dir / "services" / "app" / "docker-compose.yml"
+        block.write_text("services:\n  app:\n    image: x\n    profiles:\n      - a\n      - b\n")
+        self.assertEqual(homelab.service_profiles(block.parent), ["a", "b"])
+
+
 class RealRepoTests(unittest.TestCase):
-    """Regression guards against the real checkout."""
 
     def test_every_compose_file_parses(self):
         if not shutil.which("docker"):

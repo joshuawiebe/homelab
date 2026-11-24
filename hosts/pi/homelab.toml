@@ -1,0 +1,64 @@
+# Configuration for the always-on Pi 5: LAN services + the snapshot repository.
+#
+#   sudo ln -s /opt/homelab/hosts/pi/homelab.toml /etc/homelab/homelab.toml
+#   export HOMELAB_CONF=/etc/homelab/homelab.toml
+#   homelab doctor && homelab up
+
+[general]
+services_dir = "hosts/pi/services"
+data_dir = "/srv/homelab"
+# No reverse proxy here: these services are LAN-only on purpose.
+
+[provision.pi]
+# by-id paths, never /dev/sdX. Both must be empty and unmounted.
+devices = ["/dev/disk/by-id/CHANGE-ME-1", "/dev/disk/by-id/CHANGE-ME-2"]
+md_device = "/dev/md/repo"
+vg = "vg_repo"
+lv = "lv_repo"
+mount = "/srv/repo"
+label = "homelab-repo"
+
+[snapshot]
+tool = "restic"
+repo = "/srv/repo/restic"
+password_file = "/etc/homelab/restic.password"
+# staging mount of the NUC pulled over ssh (see docs/PLAN.md)
+source = "/srv/mnt/nuc/srv/homelab"
+exclude = ["**/cache", "**/*.tmp", "**/logs", "**/.cache"]
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 6
+check_subset = "5%"
+schedule = "*-*-* 02:30:00"
+copy = true
+healthcheck_url = ""
+gotify_url = "http://127.0.0.1:8080"
+gotify_token = ""
+
+# Run on the NUC with: homelab snapshot run --remote backups@nuc.lan
+# Consistent database dumps beat copying live files.
+pre = [
+  "docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/dumps/nextcloud.sql",
+  "sqlite3 /srv/homelab/vaultwarden/vw-data/db.sqlite3 '.backup /srv/dumps/vaultwarden.sqlite'",
+  "sqlite3 /srv/homelab/uptime_kuma/data/kuma.db '.backup /srv/dumps/kuma.sqlite'",
+]
+
+# Second local copy on the spinning disk: a bad prune cannot take both.
+[[snapshot.copies]]
+name = "cold"
+repo = "/srv/cold/restic"
+password_file = "/etc/homelab/restic-cold.password"
+limit_upload = 0
+keep_daily = 14
+keep_weekly = 8
+keep_monthly = 12
+
+# Offsite. Fill in your Storage Box sub-account. Only the Pi knows this key.
+[[snapshot.copies]]
+name = "offsite"
+repo = "sftp:u123456@u123456.your-storagebox.de:23//restic"
+password_file = "/etc/homelab/restic-offsite.password"
+limit_upload = 30000
+keep_daily = 14
+keep_weekly = 8
+keep_monthly = 12

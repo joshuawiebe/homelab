@@ -35,6 +35,8 @@ PLACEHOLDER_HINTS = ("(put", "(paste", "changeme", "changme")
 
 SECRET_HINTS = ("PASS", "TOK", "KEY", "SECRET", "PASSPHRASE")
 
+REMOTE_REPO_PREFIXES = ("sftp:", "s3:", "rest:", "b2:", "azure:", "gs:", "swift:", "rclone:")
+
 
 class HomelabError(RuntimeError):
     """Fatal, user-facing error."""
@@ -62,6 +64,20 @@ class Shell:
     def __init__(self, dry_run: bool = False, verbose: bool = False) -> None:
         self.dry_run = dry_run
         self.verbose = verbose
+
+    def probe(self, args) -> Result:
+        """Run a read-only check even in --dry-run mode."""
+        saved = self.dry_run
+        self.dry_run = False
+        try:
+            try:
+                return self.run(args, check=False)
+            except HomelabError as exc:
+                if str(exc).startswith("command not found"):
+                    return Result(1, "", str(exc))
+                raise
+        finally:
+            self.dry_run = saved
 
     def run(self, args, check: bool = True, capture: bool = True, env=None, cwd=None) -> Result:
         printable = shlex.join(args)
@@ -205,8 +221,8 @@ def find_root(explicit: str | None = None) -> Path:
     )
 
 
-def service_dirs(root: Path) -> dict:
-    base = root / SERVICES_DIR
+def service_dirs(root: Path, subdir: str = SERVICES_DIR) -> dict:
+    base = root / subdir
     if not base.is_dir():
         raise HomelabError(f"missing {base}")
     found = {}
@@ -223,6 +239,25 @@ def compose_text(path: Path) -> str:
     return (path / COMPOSE_FILE).read_text()
 
 
+def service_profiles(path: Path) -> list:
+    """Compose profiles declared by a service, if any (no YAML parser here)."""
+    found = []
+    lines = compose_text(path).splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("profiles:"):
+            continue
+        inline = stripped[len("profiles:"):].strip()
+        if inline:
+            found.extend(re.findall(r"[\w][\w.-]*", inline))
+            continue
+        for follow in lines[index + 1:]:
+            if not follow.strip().startswith("-"):
+                break
+            found.extend(re.findall(r"[\w][\w.-]*", follow))
+    return found
+
+
 def publishes_443(path: Path) -> bool:
     text = compose_text(path)
     return bool(re.search(r'"443:443"', text)) or bool(re.search(r"'443:443'", text))
@@ -236,7 +271,10 @@ def detect_proxy(dirs: dict) -> str | None:
 
 
 def load_conf(root: Path, explicit: str | None = None) -> dict:
-    path = Path(explicit) if explicit else root / CONF_NAME
+    if explicit:
+        path = Path(explicit).expanduser()
+    else:
+        path = Path(os.environ.get("HOMELAB_CONF") or root / CONF_NAME).expanduser()
     if not path.is_file():
         return {}
     import tomllib
@@ -277,8 +315,30 @@ class App:
         self.args = args
         self.root = find_root(getattr(args, "root", None))
         self.conf = load_conf(self.root, getattr(args, "conf", None))
-        self.dirs = service_dirs(self.root)
+        self.host = getattr(args, "host", None)
+        host_conf = self._host_conf(self.host)
+        general = self.conf.get("general", {})
+        subdir = host_conf.get("services_dir") or general.get("services_dir") or SERVICES_DIR
+        self.services_dir = subdir
+        self.dirs = service_dirs(self.root, subdir)
+        wanted = host_conf.get("services")
+        if wanted:
+            missing = [name for name in wanted if name not in self.dirs]
+            if missing:
+                raise HomelabError(
+                    f"host {self.host} lists unknown service(s): {', '.join(missing)}"
+                )
+            self.dirs = {name: self.dirs[name] for name in wanted}
         self.sh = Shell(dry_run=getattr(args, "dry_run", False), verbose=getattr(args, "verbose", False))
+
+    def _host_conf(self, host: str | None) -> dict:
+        hosts = self.conf.get("hosts", {})
+        if not host:
+            return {}
+        if host not in hosts:
+            known = ", ".join(sorted(hosts)) or "none configured"
+            raise HomelabError(f"unknown host: {host} (configured: {known})")
+        return hosts[host] or {}
 
     # -- helpers ----------------------------------------------------------
     @property
@@ -326,6 +386,7 @@ class App:
     def cmd_up(self) -> int:
         explicit = bool(self.args.services)
         targets = self.selected(self.args.services)
+        targets = self._drop_inactive_profiles(targets)
         if not explicit:
             targets = self._drop_extra_proxies(targets)
         self._guard_proxy_conflict(targets)
@@ -336,7 +397,10 @@ class App:
         for name in targets:
             print(f"  {name} ...", end=" ", flush=True)
             try:
-                self.sh.run(compose_cmd(self.dirs[name], "up", "-d"))
+                extra = []
+                for profile in getattr(self.args, "profile", None) or []:
+                    extra += ["--profile", profile]
+                self.sh.run(compose_cmd(self.dirs[name], *extra, "up", "-d"))
             except HomelabError as exc:
                 print("FAILED")
                 failures.append(f"{name}: {exc}")
@@ -353,6 +417,23 @@ class App:
                 print(f"  - {line}")
             return 1
         return 0
+
+    def _drop_inactive_profiles(self, targets) -> list:
+        """Services behind a compose profile only start when that profile is asked for."""
+        active = set(getattr(self.args, "profile", None) or [])
+        kept, skipped = [], []
+        for name in targets:
+            declared = set(service_profiles(self.dirs[name]))
+            if declared and not declared & active:
+                skipped.append(name)
+                continue
+            kept.append(name)
+        if skipped:
+            print(
+                f"skipping {', '.join(skipped)}: behind a compose profile "
+                f"(use `--profile {service_profiles(self.dirs[skipped[0]])[0]}`)\n"
+            )
+        return kept
 
     def _drop_extra_proxies(self, targets) -> list:
         """Only one reverse proxy may own 80/443; keep the configured one."""
@@ -585,6 +666,7 @@ class App:
         add(self._check_socket_mounts())
         add(self._check_data_in_tree())
         add(self._check_disk())
+        checks.extend(self._check_snapshots())
 
         if self.args.json:
             print(json.dumps(checks, indent=2))
@@ -647,7 +729,12 @@ class App:
         svc_dir = self.dirs[name]
         env_path = svc_dir / ENV_FILE
         template = svc_dir / ENV_TEMPLATE
-        referenced = set(re.findall(r"\$\{(\w+)\}", compose_text(svc_dir)))
+        # variables without a default are the ones an .env file must supply
+        referenced = {
+            match.group(1)
+            for match in re.finditer(r"\$\{(\w+)(?::-([^}]*))?\}", compose_text(svc_dir))
+            if match.group(2) is None
+        }
         if not env_path.is_file():
             if not template.is_file() and not referenced:
                 return self._check(f"{name} env", "OK", "no secrets needed")
@@ -693,7 +780,7 @@ class App:
     def _check_resolvers(self) -> dict:
         proxy = self.proxy
         if not proxy:
-            return self._check("tls resolver", "WARN", "no proxy detected")
+            return self._check("tls resolver", "SKIP", "this host runs no reverse proxy")
         text = compose_text(self.dirs[proxy])
         defined = set(re.findall(r"resolvers\.(\w+)\.acme", text))
         used = set()
@@ -807,6 +894,96 @@ class App:
             )
         return self._check("data location", "OK", "no state in the git tree")
 
+    def _snapshot_age_hours(self, repo: str, password_file) -> float | None:
+        """Age of the newest snapshot in hours, or None if it cannot be probed."""
+        if repo.startswith(REMOTE_REPO_PREFIXES) or not Path(repo).is_dir():
+            return None
+        if not shutil.which("restic"):
+            return None
+        args = ["restic", "--repo", repo]
+        if password_file:
+            args += ["--password-file", password_file]
+        args += ["snapshots", "--json", "--latest", "1"]
+        result = self.sh.run(args, check=False)
+        if not result.ok or not result.out.strip():
+            return None
+        try:
+            entries = json.loads(result.out)
+        except ValueError:
+            return None
+        if not entries:
+            return None
+        stamp = str(entries[0].get("time", ""))[:19]
+        try:
+            epoch = time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            return None
+        return (time.time() - epoch) / 3600
+
+    def _check_snapshots(self) -> list:
+        conf = self.snapshot_conf()
+        repo = conf.get("repo")
+        if not repo:
+            return [self._check("snapshots", "SKIP", "snapshot.repo not configured")]
+        checks = []
+        if repo.startswith(REMOTE_REPO_PREFIXES):
+            checks.append(self._check("snapshots", "OK", f"{repo} (remote, not probed)"))
+        elif not Path(repo).is_dir():
+            checks.append(
+                self._check(
+                    "snapshots", "FAIL", f"{repo} is missing or not mounted",
+                    "mount the mirror, or run `homelab provision pi`",
+                )
+            )
+        else:
+            age = self._snapshot_age_hours(repo, conf.get("password_file"))
+            if age is None:
+                checks.append(
+                    self._check(
+                        "snapshots", "WARN", f"{repo}: snapshots unreadable",
+                        "check the passphrase file, then `homelab snapshot list`",
+                    )
+                )
+            elif age > 36:
+                checks.append(
+                    self._check(
+                        "snapshots", "FAIL",
+                        f"{repo}: newest snapshot is {age / 24:.1f} days old",
+                        "the timer is not running: `systemctl list-timers 'homelab-*'`",
+                    )
+                )
+            else:
+                checks.append(self._check("snapshots", "OK", f"{repo}: newest {age:.1f}h old"))
+        for copy in conf.get("copies") or []:
+            name = copy.get("name", "?")
+            target = str(copy.get("repo", ""))
+            if target.startswith(REMOTE_REPO_PREFIXES):
+                checks.append(self._check(f"copy {name}", "OK", f"{target} (remote, not probed)"))
+                continue
+            if not Path(target).is_dir():
+                checks.append(
+                    self._check(
+                        f"copy {name}", "FAIL", f"{target} is missing",
+                        "run `homelab snapshot copy`",
+                    )
+                )
+                continue
+            age = self._snapshot_age_hours(target, copy.get("password_file"))
+            if age is None:
+                checks.append(self._check(f"copy {name}", "WARN", f"{target}: unreadable"))
+            elif age > 7 * 24:
+                checks.append(
+                    self._check(
+                        f"copy {name}", "WARN", f"newest copy is {age / 24:.1f} days old",
+                        "run `homelab snapshot copy`",
+                    )
+                )
+            else:
+                checks.append(
+                    self._check(f"copy {name}", "OK", f"newest {age / 24:.1f} days old")
+                )
+        return checks
+
     def _check_disk(self) -> dict:
         targets = []
         data_dir = self.conf.get("general", {}).get("data_dir")
@@ -874,7 +1051,40 @@ class App:
         if action == "stats":
             backend.stats()
             return 0
+        if action == "copy":
+            return self._snapshot_copy(backend, conf)
         raise HomelabError(f"unknown snapshot action: {action}")
+
+    def _snapshot_copy(self, backend, conf) -> int:
+        copies = conf.get("copies") or []
+        if not copies:
+            raise HomelabError("no [[snapshot.copies]] targets configured in homelab.toml")
+        wanted = getattr(self.args, "only", None) or [c.get("name") for c in copies]
+        chosen = []
+        for name in wanted:
+            match = next((c for c in copies if c.get("name") == name), None)
+            if not match:
+                known = ", ".join(str(c.get("name")) for c in copies)
+                raise HomelabError(f"unknown copy target: {name} (configured: {known})")
+            chosen.append(match)
+        for target in chosen:
+            name = target.get("name")
+            print(f"copy -> {name} ({target['repo']})")
+            backend.copy_to(
+                target["repo"],
+                target.get("password_file"),
+                target.get("limit_upload"),
+            )
+            if target.get("prune", True):
+                backend.forget_at(
+                    target["repo"],
+                    target.get("password_file"),
+                    target.get("keep_daily", 14),
+                    target.get("keep_weekly", 8),
+                    target.get("keep_monthly", 12),
+                )
+            print(f"copy -> {name} done")
+        return 0
 
     def _snapshot_run(self, backend, conf) -> int:
         remote = getattr(self.args, "remote", None)
@@ -892,6 +1102,8 @@ class App:
             )
             if not self.args.no_check:
                 backend.check(conf.get("check_subset", "5%"))
+            if conf.get("copy"):
+                self._snapshot_copy(backend, conf)
         except HomelabError as exc:
             self.notify(conf, ok=False, message=str(exc))
             raise
@@ -975,6 +1187,16 @@ WantedBy=timers.target
         print("removed homelab-snapshot units")
         return 0
 
+    # -- provision --------------------------------------------------------
+    def cmd_provision(self) -> int:
+        if self.args.target != "pi":
+            raise HomelabError(
+                "only `provision pi` is implemented here; the proxmox steps are "
+                "documented in docs/PLAN.md"
+            )
+        provisioner = PiProvisioner(self)
+        return provisioner.run()
+
     # -- install ----------------------------------------------------------
     def cmd_install(self) -> int:
         prefix = Path(self.args.prefix)
@@ -1002,6 +1224,165 @@ WantedBy=timers.target
         return 0
 
 
+# ------------------------------------------------------------------ provision
+
+
+def validate_pi_devices(devices, sh: Shell) -> list:
+    """Problems that make it unsafe to put these devices into a new array."""
+    problems = []
+    root_source = sh.probe(["findmnt", "-no", "SOURCE", "/"]).out.strip()
+    root_real = os.path.realpath(root_source) if root_source else ""
+    for dev in devices:
+        if not sh.probe(["test", "-b", dev]).ok:
+            problems.append(f"{dev}: not a block device")
+            continue
+        if os.path.realpath(dev) == root_real:
+            problems.append(f"{dev}: this holds the running root filesystem")
+        mounted = sh.probe(["lsblk", "-no", "MOUNTPOINT", dev]).out.strip()
+        if mounted:
+            problems.append(f"{dev}: mounted at {mounted}")
+        signature = sh.probe(
+            ["blkid", "-p", "-o", "value", "-s", "TYPE", dev]
+        ).out.strip()
+        if signature:
+            problems.append(
+                f"{dev}: still holds a {signature} signature "
+                f"(wipe it yourself with `wipefs -a {dev}`)"
+            )
+    return problems
+
+
+class PiProvisioner:
+    """Build the mirrored LVM repo on the Pi. Never wipes anything by itself."""
+
+    def __init__(self, app: "App") -> None:
+        self.app = app
+        self.args = app.args
+        self.sh = app.sh
+        conf = (app.conf.get("provision") or {}).get("pi") or {}
+        self.devices = list(conf.get("devices") or [])
+        self.md = conf.get("md_device", "/dev/md/repo")
+        self.vg = conf.get("vg", "vg_repo")
+        self.lv = conf.get("lv", "lv_repo")
+        self.mount = conf.get("mount", "/srv/repo")
+        self.label = conf.get("label", "repo")
+
+    @property
+    def logical(self) -> str:
+        return f"/dev/{self.vg}/{self.lv}"
+
+    def steps(self) -> list:
+        first, second = (self.devices + ["", ""])[:2]
+        return [
+            {
+                "what": f"mirror {first} + {second} into {self.md}",
+                "probe": ["test", "-b", self.md],
+                "cmd": [
+                    "mdadm", "--create", self.md,
+                    "--level=1", "--raid-devices=2", first, second,
+                ],
+            },
+            {
+                "what": f"volume group {self.vg} on {self.md}",
+                "probe": ["vgs", self.vg],
+                "cmd": ["vgcreate", self.vg, self.md],
+            },
+            {
+                "what": f"logical volume {self.lv} using all free extents",
+                "probe": ["lvs", self.logical],
+                "cmd": ["lvcreate", "-l", "100%FREE", "-n", self.lv, self.vg],
+            },
+            {
+                "what": f"ext4 on {self.logical} labelled {self.label}",
+                "probe": ["blkid", "-o", "value", "-s", "TYPE", self.logical],
+                "cmd": ["mkfs.ext4", "-m", "1", "-L", self.label, self.logical],
+            },
+            {
+                "what": f"mount point {self.mount}",
+                "probe": ["test", "-d", self.mount],
+                "cmd": ["mkdir", "-p", self.mount],
+            },
+            {
+                "what": f"persist {self.mount} in /etc/fstab",
+                "probe": None,
+                "fn": self._ensure_fstab,
+            },
+            {
+                "what": f"mount {self.logical} at {self.mount}",
+                "probe": ["findmnt", "-no", "TARGET", self.mount],
+                "cmd": ["mount", self.logical, self.mount],
+            },
+        ]
+
+    def _ensure_fstab(self) -> str:
+        entry = Path("/etc/fstab")
+        existing = entry.read_text() if entry.is_file() else ""
+        if self.mount in existing:
+            return f"fstab already mounts {self.mount}"
+        if self.sh.dry_run:
+            return (
+                f"would append `UUID=<uuid of {self.logical}> "
+                f"{self.mount} ext4 defaults,noatime 0 2`"
+            )
+        uuid = self.sh.probe(
+            ["blkid", "-o", "value", "-s", "UUID", self.logical]
+        ).out.strip()
+        if not uuid:
+            raise HomelabError(f"cannot read the UUID of {self.logical}")
+        line = f"UUID={uuid} {self.mount} ext4 defaults,noatime 0 2"
+        with entry.open("a") as handle:
+            handle.write(f"\n# homelab snapshot repo\n{line}\n")
+        return f"appended to /etc/fstab: {line}"
+
+    def _done(self, step: dict) -> bool:
+        probe = step.get("probe")
+        if not probe:
+            return False
+        return self.sh.probe(probe).ok
+
+    def run(self) -> int:
+        if len(self.devices) != 2:
+            raise HomelabError(
+                'set [provision.pi] devices = ["/dev/disk/by-id/...", "..."] in homelab.toml'
+            )
+        problems = validate_pi_devices(self.devices, self.sh)
+        plan = self.steps()
+        print(f"target mount: {self.mount}   array: {self.md}   vg: {self.vg}\n")
+        for index, step in enumerate(plan, 1):
+            state = "skip" if self._done(step) else "run "
+            detail = " ".join(step["cmd"]) if step.get("cmd") else "edit /etc/fstab"
+            print(f"  {index}. [{state}] {step['what']}\n            {detail}")
+        if problems:
+            print("\nrefusing to touch these devices:")
+            for problem in problems:
+                print(f"  - {problem}")
+            return 1
+        if not self.args.apply:
+            print("\ndry run; re-run with --apply to execute")
+            return 0
+        if os.geteuid() != 0:
+            raise HomelabError("provisioning needs root")
+        if not self.args.yes:
+            answer = input(
+                f"\nThis creates {self.md} from {', '.join(self.devices)}. Type 'yes': "
+            )
+            if answer.strip() != "yes":
+                raise HomelabError("aborted")
+        for step in plan:
+            if self._done(step):
+                print(f"  skip {step['what']}")
+                continue
+            print(f"  run  {step['what']}")
+            if step.get("fn"):
+                print(f"       {step['fn']()}")
+            else:
+                self.sh.run(step["cmd"], capture=False)
+        print(
+            "\nnext: `homelab snapshot install` for the timer, then `homelab doctor`"
+        )
+        return 0
+
+
 # --------------------------------------------------------------------- backends
 
 
@@ -1020,16 +1401,28 @@ class ResticCli:
         self.sh.run(args, capture=False)
 
     def forget(self, daily: int, weekly: int, monthly: int) -> None:
-        self.sh.run(
-            [
-                *self.base, "forget",
-                "--keep-daily", str(daily),
-                "--keep-weekly", str(weekly),
-                "--keep-monthly", str(monthly),
-                "--prune",
-            ],
-            capture=False,
-        )
+        self.forget_at(self.conf["repo"], self.conf.get("password_file"), daily, weekly, monthly)
+
+    def forget_at(self, repo: str, password_file, daily: int, weekly: int, monthly: int) -> None:
+        args = ["restic", "--repo", repo]
+        if password_file:
+            args += ["--password-file", password_file]
+        args += [
+            "forget",
+            "--keep-daily", str(daily),
+            "--keep-weekly", str(weekly),
+            "--keep-monthly", str(monthly),
+            "--prune",
+        ]
+        self.sh.run(args, capture=False)
+
+    def copy_to(self, dest: str, dest_password_file, limit_upload=None) -> None:
+        args = [*self.base, "copy", "--repo2", dest]
+        if dest_password_file:
+            args += ["--password-file2", dest_password_file]
+        if limit_upload:
+            args += ["--limit-upload", str(limit_upload)]
+        self.sh.run(args, capture=False)
 
     def check(self, subset: str, full: bool = False) -> None:
         args = [*self.base, "check"]
@@ -1070,16 +1463,25 @@ class BorgCli:
         self.sh.run(args, capture=False, env=self._env())
 
     def forget(self, daily: int, weekly: int, monthly: int) -> None:
+        self.forget_at(self.repo, None, daily, weekly, monthly)
+
+    def forget_at(self, repo: str, password_file, daily: int, weekly: int, monthly: int) -> None:
         self.sh.run(
             [
                 "borg", "prune", "--list",
                 "--keep-daily", str(daily),
                 "--keep-weekly", str(weekly),
                 "--keep-monthly", str(monthly),
-                self.repo,
+                repo,
             ],
             capture=False,
             env=self._env(),
+        )
+
+    def copy_to(self, dest: str, dest_password_file, limit_upload=None) -> None:
+        raise HomelabError(
+            "borg cannot copy between repositories (that is borg 2 `transfer`); "
+            "use restic for the replicated topology, or run a second `borg create`"
         )
 
     def check(self, subset: str, full: bool = False) -> None:
@@ -1111,6 +1513,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="run, inspect, verify and snapshot the homelab docker stack",
     )
     parser.add_argument("--root", help="path to the homelab checkout")
+    parser.add_argument("--host", help="only this host's services (see [hosts] in homelab.toml)")
     parser.add_argument("--conf", help="path to homelab.toml")
     parser.add_argument("--verbose", action="store_true", help="echo every command")
     parser.add_argument("--version", action="version", version=f"homelab {VERSION}")
@@ -1119,6 +1522,9 @@ def build_parser() -> argparse.ArgumentParser:
     up = subs.add_parser("up", help="start services in dependency order")
     up.add_argument("services", nargs="*")
     up.add_argument("--proxy", help="reverse proxy to start")
+    up.add_argument(
+        "--profile", action="append", help="enable this compose profile (repeatable)"
+    )
     up.add_argument("--no-wait", action="store_true", help="do not wait for health")
     up.add_argument("--wait", type=int, default=90, help="seconds to wait (default 90)")
     up.add_argument("--allow-port-conflict", action="store_true")
@@ -1156,7 +1562,9 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot = subs.add_parser("snapshot", help="snapshot the stack (restic or borg)")
     snapshot.add_argument(
         "action",
-        choices=["run", "list", "verify", "extract", "stats", "install", "uninstall"],
+        choices=[
+            "run", "list", "verify", "extract", "stats", "copy", "install", "uninstall",
+        ],
     )
     snapshot.add_argument("snapshot", nargs="?", help="snapshot id for extract")
     snapshot.add_argument("target", nargs="?", help="target dir for extract", default=".")
@@ -1164,7 +1572,16 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--full", action="store_true", help="verify reads all data")
     snapshot.add_argument("--no-check", action="store_true", help="skip post-run verify")
     snapshot.add_argument("--remote", help="run pre-hooks over ssh on this host")
+    snapshot.add_argument(
+        "--only", action="append", help="limit `copy` to this target name"
+    )
     snapshot.add_argument("--dry-run", action="store_true")
+
+    provision = subs.add_parser("provision", help="bootstrap a host (pi mirror + repo)")
+    provision.add_argument("target", choices=["pi"])
+    provision.add_argument("--apply", action="store_true", help="execute, not just print")
+    provision.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    provision.add_argument("--dry-run", action="store_true")
 
     install = subs.add_parser("install", help="symlink the CLI into PATH")
     install.add_argument("--prefix", default="/usr/local/bin")
@@ -1185,6 +1602,7 @@ COMMANDS = {
     "config": "cmd_config",
     "doctor": "cmd_doctor",
     "snapshot": "cmd_snapshot",
+    "provision": "cmd_provision",
     "install": "cmd_install",
     "uninstall": "cmd_uninstall",
 }
