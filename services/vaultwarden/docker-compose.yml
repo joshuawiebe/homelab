@@ -1,6 +1,6 @@
 services:
   vaultwarden:
-    image: vaultwarden/server:latest
+    image: ${VAULTWARDEN_IMAGE:-vaultwarden/server:latest}
     container_name: vaultwarden
     hostname: vaultwarden
     restart: unless-stopped
@@ -15,7 +15,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.vaultwarden.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.vaultwarden.entrypoints=websecure"
-      - "traefik.http.routers.vaultwarden.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.vaultwarden.middlewares=security-headers@docker"
+      - "traefik.http.routers.vaultwarden.tls.certresolver=dns"
       - "traefik.http.routers.vaultwarden.tls.domains[0].main=${DOMAIN}"
 
 networks:

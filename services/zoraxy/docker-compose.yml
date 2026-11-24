@@ -1,6 +1,6 @@
 services:
   zoraxy:
-    image: zoraxydocker/zoraxy:latest
+    image: ${ZORAXY_IMAGE:-zoraxydocker/zoraxy:latest}
     container_name: zoraxy
     hostname: zoraxy
     restart: unless-stopped

@@ -45,3 +45,10 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# htpasswd file for the traefik dashboard
+services/traefik/users
+
+# python bytecode
+__pycache__/
+*.pyc

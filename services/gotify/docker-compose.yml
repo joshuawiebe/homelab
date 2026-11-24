@@ -1,6 +1,6 @@
 services:
   gotify:
-    image: gotify/server:latest
+    image: ${GOTIFY_IMAGE:-gotify/server:latest}
     container_name: gotify
     hostname: gotify
     restart: unless-stopped
@@ -14,7 +14,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.gotify.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.gotify.entrypoints=websecure"
-      - "traefik.http.routers.gotify.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.gotify.middlewares=security-headers@docker"
+      - "traefik.http.routers.gotify.tls.certresolver=dns"
       - "traefik.http.routers.gotify.tls.domains[0].main=${DOMAIN}"
 
 networks:

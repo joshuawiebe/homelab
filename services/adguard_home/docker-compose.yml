@@ -1,6 +1,6 @@
 services:
   adguard_home:
-    image: adguard/adguardhome:latest
+    image: ${ADGUARD_IMAGE:-adguard/adguardhome:latest}
     container_name: adguard_home
     hostname: adguard_home
     restart: unless-stopped
@@ -18,7 +18,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.adguard_home.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.adguard_home.entrypoints=websecure"
-      - "traefik.http.routers.adguard_home.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.adguard_home.middlewares=security-headers@docker"
+      - "traefik.http.routers.adguard_home.tls.certresolver=dns"
       - "traefik.http.routers.adguard_home.tls.domains[0].main=${DOMAIN}"
 
 networks:

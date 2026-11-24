@@ -1,0 +1,38 @@
+# homelab.toml - settings for the `homelab` CLI. Copy to homelab.toml and edit.
+# Nothing here is secret: secrets live in services/*/.env and in password files.
+
+[general]
+# Reverse proxy to start. Both publish 80/443, so only one may run.
+proxy = "traefik"
+# Where container state should live. Anything here is backed up; the git tree is not.
+data_dir = "/srv/homelab"
+# Start order. The proxy always goes first; unlisted services follow alphabetically.
+order = ["adguard_home", "gotify", "nextcloud", "vaultwarden", "uptime_kuma", "watchtower"]
+
+[snapshot]
+tool = "restic"                                  # restic | borg
+repo = "/srv/repo/restic"                        # local repo on the Pi (pull model)
+password_file = "/etc/homelab/restic.password"   # mode 600, root-only
+source = "/srv/mnt/nuc/srv/homelab"              # sshfs/rsync staging dir, or the local data_dir
+exclude = ["**/cache", "**/*.tmp", "**/logs"]
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 6
+check_subset = "5%"                              # restic --read-data-subset for weekly verify
+schedule = "*-*-* 02:30:00"
+
+# Commands run before the snapshot (on the source host with --remote HOST).
+# These keep databases consistent without stopping the stack.
+pre = [
+  "docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/dumps/nextcloud.sql",
+  "sqlite3 /srv/homelab/vaultwarden/vw-data/db.sqlite3 '.backup /srv/dumps/vaultwarden.sqlite'",
+  "sqlite3 /srv/homelab/uptime_kuma/data/kuma.db '.backup /srv/dumps/kuma.sqlite'",
+]
+
+# Alerting. Both are optional; healthcheck_url is the important one (dead-man's switch).
+healthcheck_url = ""
+gotify_url = ""
+gotify_token = ""
+
+# borg only: file containing the passphrase (BORG_PASSCOMMAND)
+# passphrase_file = "/etc/homelab/borg.passphrase"

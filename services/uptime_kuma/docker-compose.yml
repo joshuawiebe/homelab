@@ -1,6 +1,6 @@
 services:
   uptime_kuma:
-    image: louislam/uptime-kuma:latest
+    image: ${UPTIME_KUMA_IMAGE:-louislam/uptime-kuma:latest}
     container_name: uptime_kuma
     hostname: uptime_kuma
     restart: unless-stopped
@@ -12,7 +12,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.uptime_kuma.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.uptime_kuma.entrypoints=websecure"
-      - "traefik.http.routers.uptime_kuma.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.uptime_kuma.middlewares=security-headers@docker"
+      - "traefik.http.routers.uptime_kuma.tls.certresolver=dns"
       - "traefik.http.routers.uptime_kuma.tls.domains[0].main=${DOMAIN}"
 
 networks:

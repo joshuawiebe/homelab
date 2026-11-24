@@ -1,6 +1,6 @@
 services:
   traefik:
-    image: traefik:latest
+    image: ${TRAEFIK_IMAGE:-traefik:latest}
     container_name: traefik
     restart: unless-stopped
     command:
@@ -15,10 +15,10 @@ services:
       - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
       - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
       # ACME DNS challenge (ipv64)
-      - "--certificatesresolvers.ipv64.acme.dnschallenge=true"
-      - "--certificatesresolvers.ipv64.acme.dnschallenge.provider=ipv64"
-      - "--certificatesresolvers.ipv64.acme.email=${EMAIL}"
-      - "--certificatesresolvers.ipv64.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.dns.acme.dnschallenge=true"
+      - "--certificatesresolvers.dns.acme.dnschallenge.provider=ipv64"
+      - "--certificatesresolvers.dns.acme.email=${EMAIL}"
+      - "--certificatesresolvers.dns.acme.storage=/letsencrypt/acme.json"
 
     ports:
       - "80:80"
@@ -29,6 +29,7 @@ services:
 
     volumes:
       - ./letsencrypt:/letsencrypt
+      - ./users:/etc/traefik/users:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/localtime:/etc/localtime:ro
 
@@ -47,10 +48,9 @@ services:
       - "traefik.http.routers.traefik.rule=Host(`${TRAEFIK_SUBDOMAIN}.${BASE_DOMAIN}`)"
       - "traefik.http.routers.traefik.entrypoints=websecure"
       - "traefik.http.routers.traefik.service=api@internal"
-      - "traefik.http.routers.traefik.tls.certresolver=ipv64"
-      - "traefik.http.routers.traefik.middlewares=traefik-auth,security-headers"
-      - "traefik.http.middlewares.traefik-auth.basicauth.users=${DASHBOARD_USER}:${DASHBOARD_PASSWORD}"
-      - "traefik.http.middlewares.security-headers.headers.sslredirect=true"
+      - "traefik.http.routers.traefik.tls.certresolver=dns"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth@docker,security-headers@docker,ratelimit@docker"
+      - "traefik.http.middlewares.traefik-auth.basicauth.usersfile=/etc/traefik/users"
       - "traefik.http.middlewares.security-headers.headers.stsSeconds=31536000"
       - "traefik.http.middlewares.security-headers.headers.stsIncludeSubdomains=true"
       - "traefik.http.middlewares.security-headers.headers.stsPreload=true"
@@ -58,6 +58,8 @@ services:
       - "traefik.http.middlewares.security-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.security-headers.headers.referrerPolicy=same-origin"
       - "traefik.http.middlewares.security-headers.headers.permissionsPolicy=accelerometer=(),camera=(),geolocation=()"
+      - "traefik.http.middlewares.ratelimit.ratelimit.average=50"
+      - "traefik.http.middlewares.ratelimit.ratelimit.burst=100"
 
 networks:
   proxy:
