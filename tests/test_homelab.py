@@ -557,6 +557,115 @@ class SecretCoverageTests(unittest.TestCase):
         self.assertEqual(check["status"], "OK")
 
 
+class DiskDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="homelab-disks-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.by_id = self.tmp / "by-id"
+        self.by_id.mkdir()
+        self.mounts = self.tmp / "mounts"
+        self.mounts.write_text(f"{self.tmp}/sda1 / ext4 rw 0 0\n")
+
+    def disk(self, name, *ids, mounted_at=None):
+        target = self.tmp / name
+        target.write_text("")
+        for alias in ids:
+            (self.by_id / alias).symlink_to(target)
+        if mounted_at:
+            self.mounts.write_text(
+                self.mounts.read_text() + f"{target}1 {mounted_at} ext4 rw 0 0\n"
+            )
+        return target
+
+    def test_duplicate_ids_collapse_to_one_disk(self):
+        self.disk("sdb", "ata-A", "wwn-A")
+        self.disk("sdc", "ata-B")
+        found = homelab.discover_disks(self.by_id, self.mounts)
+        self.assertEqual([Path(d["device"]).name for d in found], ["sdb", "sdc"])
+        self.assertEqual(found[0]["id"], str(self.by_id / "ata-A"))
+
+    def test_partitions_and_virtual_devices_are_skipped(self):
+        self.disk("sdb", "ata-A", "ata-A-part1")
+        self.disk("md0", "md-name:repo")
+        self.disk("dm-0", "dm-name-repo")
+        found = homelab.discover_disks(self.by_id, self.mounts)
+        self.assertEqual([Path(d["device"]).name for d in found], ["sdb"])
+
+    def test_the_root_disk_is_never_offered(self):
+        self.disk("sda", "ata-ROOT")
+        self.disk("sdb", "ata-A")
+        found = homelab.discover_disks(self.by_id, self.mounts)
+        self.assertEqual([Path(d["device"]).name for d in found], ["sdb"])
+
+    def test_a_mounted_disk_is_never_offered(self):
+        self.disk("sdb", "ata-A", mounted_at="/srv/repo")
+        self.disk("sdc", "ata-B")
+        found = homelab.discover_disks(self.by_id, self.mounts)
+        self.assertEqual([Path(d["device"]).name for d in found], ["sdc"])
+
+    def test_missing_by_id_directory_is_not_an_error(self):
+        self.assertEqual(homelab.discover_disks(self.tmp / "nope", self.mounts), [])
+
+
+class ProvisionConfigTests(unittest.TestCase):
+    TOML = """[general]
+data_dir = "/srv/homelab"
+
+[provision.pi]
+# by-id paths, never /dev/sdX.
+devices = []
+md_device = "/dev/md/repo"
+"""
+
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        self.conf = self.repo.dir / "homelab.toml"
+        self.conf.write_text(self.TOML)
+        self.tmp = Path(tempfile.mkdtemp(prefix="homelab-disks-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        by_id = self.tmp / "by-id"
+        by_id.mkdir()
+        for name, alias in (("sdb", "ata-A"), ("sdc", "ata-B")):
+            target = self.tmp / name
+            target.write_text("")
+            (by_id / alias).symlink_to(target)
+        mounts = self.tmp / "mounts"
+        mounts.write_text(f"{self.tmp}/sda1 / ext4 rw 0 0\n")
+        self.saved = (homelab.DISK_BY_ID_DIR, homelab.MOUNTS_FILE)
+        self.addCleanup(lambda: setattr(homelab, "DISK_BY_ID_DIR", self.saved[0]))
+        self.addCleanup(lambda: setattr(homelab, "MOUNTS_FILE", self.saved[1]))
+        homelab.DISK_BY_ID_DIR = by_id
+        homelab.MOUNTS_FILE = mounts
+
+    def test_config_writes_the_two_disks_it_found(self):
+        code, out, err = run_cli(
+            ["--root", str(self.repo.dir), "config", "--non-interactive"]
+        )
+        self.assertEqual(code, 0, out + err)
+        import tomllib
+
+        conf = tomllib.loads(self.conf.read_text())
+        devices = conf["provision"]["pi"]["devices"]
+        self.assertEqual([Path(d).name for d in devices], ["ata-A", "ata-B"])
+        self.assertEqual(conf["provision"]["pi"]["md_device"], "/dev/md/repo")
+        self.assertIn("# by-id paths, never /dev/sdX.", self.conf.read_text())
+
+    def test_doctor_warns_until_devices_are_set(self):
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["provision devices"]["status"], "WARN")
+        self.assertIn("homelab config", checks["provision devices"]["hint"])
+
+    def test_doctor_fails_when_a_configured_disk_vanished(self):
+        self.conf.write_text(
+            self.TOML.replace("devices = []", 'devices = ["/dev/disk/by-id/ata-GONE", "/dev/disk/by-id/ata-GONE2"]')
+        )
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["provision devices"]["status"], "FAIL")
+
+
 class CopyTests(unittest.TestCase):
     TOML = (
         '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'

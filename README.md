@@ -30,12 +30,13 @@ and snapshots all of it.
 7. [CLI reference](#cli-reference)
 8. [Services](#services)
 9. [Networking and TLS](#networking-and-tls)
-10. [Backups](#backups)
-11. [The Pi](#the-pi)
-12. [What `doctor` checks](#what-doctor-checks)
-13. [Troubleshooting](#troubleshooting)
-14. [Development](#development)
-15. [License](#license)
+10. [Choosing an OS](#choosing-an-os)
+11. [Backups](#backups)
+12. [The Pi](#the-pi)
+13. [What `doctor` checks](#what-doctor-checks)
+14. [Troubleshooting](#troubleshooting)
+15. [Development](#development)
+16. [License](#license)
 
 ---
 
@@ -193,10 +194,9 @@ the ones that actually run.
 | `gotify` | push notifications (also on the Pi) |
 | `uptime_kuma` | uptime monitoring (also on the Pi) |
 | `watchtower` | image updates - **opt-in per container** |
-| `zoraxy` | alternative reverse proxy, mutually exclusive with Traefik |
 
-Traefik and Zoraxy both publish 80/443, so `homelab up` refuses to start both unless you
-pass `--allow-port-conflict`. Pick one with `--proxy` or `[general] proxy`.
+Only one service may publish 80/443. `homelab up` refuses to start a second one unless you
+pass `--allow-port-conflict`, and `[general] proxy` names the one that owns the ports.
 
 Image versions are pinned through env vars, so pinning never means editing a compose file:
 
@@ -246,6 +246,39 @@ at 644 and the resulting error message does not mention ACME at all.
 If you do not need to publish anything, put the stack behind Tailscale
 (`hosts/pi/services/tailscale/`) and skip the port forwards entirely. `doctor` works either
 way.
+
+## Choosing an OS
+
+**The NUC's Docker VM: Debian 13 (trixie), minimal, no desktop.**
+
+- Same base as Proxmox itself, so the guest and host tooling stay familiar, and the `virtio`
+  drivers are in the stock kernel.
+- The netinst ISO with only "SSH server" and "standard system utilities" gives you a small
+  system with no GUI, no snapd, and no surprises.
+- Docker from Docker's own apt repository (`docker-ce`, `docker-compose-plugin`), not
+  Debian's older `docker.io`.
+- 4 vCPU / 8 GB is plenty for this stack. Pass the whole 1 TB disk through as a raw disk
+  instead of a qcow2 file: `DATA_DIR` writes then hit the real device, and the Pi's pull
+  reads a real filesystem rather than an image.
+- Add `qemu-guest-agent` so Proxmox can report the IP and freeze the filesystem for
+  host-level snapshots.
+- Ubuntu Server 24.04 LTS is a fine alternative if you want the longer support window. Avoid
+  the desktop images on a server.
+
+**The Pi 5: Raspberry Pi OS Lite (64-bit), the current release.**
+
+- It is the only distribution that ships the Pi's own bootloader and firmware tooling
+  (`rpi-eeprom`, `vcgencmd`) and the kernel with the right SD and USB quirks. On a box whose
+  job is `mdadm` + `sshfs` + `restic`, boring and supported wins.
+- Take the **64-bit** image. A 32-bit userland caps one process at 4 GB of address space,
+  which is exactly what `restic prune` runs into on a large repository.
+- Flash with Raspberry Pi Imager and set the hostname, SSH key and locale before first boot.
+- Plain Debian arm64 also works, but you lose the firmware tooling and end up adding the
+  Raspberry Pi archive by hand for kernel updates.
+
+Both machines: `noatime` on the data filesystems, `journald` capped (`SystemMaxUse=200M`),
+and swap off or on zram. The microSD in the Pi is the part that fails first, and every write
+you remove from it buys time.
 
 ## Backups
 
@@ -372,8 +405,12 @@ homelab doctor
 homelab up
 ```
 
-`provision pi` builds the md RAID1 mirror, LVM volume, filesystem, label and fstab entry from
-`[provision.pi] devices`. It refuses to continue if a device is missing, mounted, still holds
+`homelab config` lists the candidate disks on this host (whole disks, not partitions, not the
+root disk, not anything mounted) and writes the two you pick into `[provision.pi] devices`, so
+the committed config stays generic and the same repo works on your Pi and anyone else's.
+
+`provision pi` then builds the md RAID1 mirror, LVM volume, filesystem, label and fstab entry
+from those devices. It refuses to continue if a device is missing, mounted, still holds
 a filesystem signature, or is the root device, and it never wipes anything: if a disk is
 dirty it tells you to run `wipefs -a` yourself. That is deliberate - the one thing a
 provisioning tool must not do is guess.
@@ -414,6 +451,7 @@ Ordered roughly from "will not boot" to "smells":
 * snapshot repo mounted, newest snapshot younger than 36 hours, every copy target fresh
 * snapshot hooks: a dump that writes outside `data_dir` and every source
 * secret coverage: `.env` files that no snapshot covers
+* provision devices: chosen, present, and not a `CHANGE-ME` placeholder
 
 Exit code is 1 on any `FAIL`, so it is safe to run from cron or a deploy script.
 
@@ -452,9 +490,10 @@ and fix the credentials inside the app.
 python3 -m unittest discover -s tests -v
 ```
 
-85 tests: env parsing, ordering, dry-run command construction, host filtering, every doctor
+93 tests: env parsing, ordering, dry-run command construction, host filtering, every doctor
 check (including the resolver, unset-variable, hook-target and secret-coverage regressions),
-config generation, restic/borg command building, the copy chain, snapshot init, and the Pi
+config generation, restic/borg command building, the copy chain, snapshot init, disk
+discovery (root disk, mounted disks and partitions are never offered), and the Pi
 provisioning guardrails. No docker daemon needed - `docker compose config` is used only to
 validate YAML when docker is present.
 

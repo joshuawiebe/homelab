@@ -11,7 +11,9 @@ data_dir = "/srv/homelab"
 
 [provision.pi]
 # by-id paths, never /dev/sdX. Both must be empty and unmounted.
-devices = ["/dev/disk/by-id/CHANGE-ME-1", "/dev/disk/by-id/CHANGE-ME-2"]
+# `sudo homelab config` lists the candidate disks on this host and writes them here, so this
+# file stays generic in git. `homelab doctor` warns until it is filled in.
+devices = []
 md_device = "/dev/md/repo"
 vg = "vg_repo"
 lv = "lv_repo"

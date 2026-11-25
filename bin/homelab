@@ -26,13 +26,13 @@ import time
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONF_NAME = "homelab.toml"
 SERVICES_DIR = "services"
 COMPOSE_FILE = "docker-compose.yml"
 ENV_TEMPLATE = ".env.template"
 ENV_FILE = ".env"
-PLACEHOLDER_HINTS = ("(put", "(paste", "changeme", "changme")
+PLACEHOLDER_HINTS = ("(put", "(paste", "changeme", "changme", "change-me")
 
 SECRET_HINTS = ("PASS", "TOK", "KEY", "SECRET", "PASSPHRASE")
 
@@ -667,8 +667,54 @@ class App:
                 write_env(env_path, updates)
                 print(f"  wrote {env_path.relative_to(self.root)} (mode 600)")
         self._ensure_basicauth()
+        self._configure_provision_devices()
         print("\nconfiguration written; run `homelab doctor` next")
         return 0
+
+    def _configure_provision_devices(self) -> None:
+        section = (self.conf.get("provision") or {}).get("pi")
+        if not section:
+            return
+        print("\n[provision.pi]")
+        configured = [d for d in section.get("devices") or [] if d and not is_placeholder(d)]
+        if len(configured) == 2 and all(Path(d).exists() for d in configured):
+            print(f"  already set: {', '.join(configured)}")
+            return
+        disks = discover_disks()
+        if not disks:
+            print("  no spare disks found; set [provision.pi] devices by hand")
+            return
+        for index, disk in enumerate(disks, 1):
+            print(f"  {index}. {disk['id']}  ({disk['size']})")
+        chosen = disks[:2]
+        if not self.args.non_interactive:
+            answer = input("  two disks for the mirror, by number [1,2]: ").strip() or "1,2"
+            picked = []
+            for token in answer.replace(" ", "").split(","):
+                if token.isdigit() and 1 <= int(token) <= len(disks):
+                    picked.append(disks[int(token) - 1])
+            chosen = picked
+        if len(chosen) != 2:
+            print("  need exactly two disks; leaving devices unset")
+            return
+        self._write_provision_devices([disk["id"] for disk in chosen])
+
+    def _write_provision_devices(self, devices) -> None:
+        path = self._conf_path()
+        text = path.read_text()
+        match = re.search(r"(?ms)^\[provision\.pi\]\s*$(.*?)(?=^\[|\Z)", text)
+        if not match:
+            raise HomelabError(f"[provision.pi] is not in {path}")
+        body = match.group(1)
+        line = "devices = [" + ", ".join(f'"{device}"' for device in devices) + "]"
+        if re.search(r"(?m)^\s*devices\s*=", body):
+            body = re.sub(r"(?m)^\s*devices\s*=.*$", lambda _: line, body, count=1)
+        else:
+            body = body.rstrip("\n") + "\n" + line + "\n"
+        path.write_text(text[: match.start(1)] + body + text[match.end(1):])
+        self.conf = load_conf(self.root, str(path))
+        print(f"  wrote {line}")
+        print("  check it with `homelab provision pi` (no --apply) before you trust it")
 
     def _ensure_basicauth(self) -> None:
         proxy = self.proxy
@@ -740,6 +786,7 @@ class App:
         checks.extend(self._check_snapshots())
         checks.append(self._check_hook_targets())
         checks.append(self._check_secret_coverage())
+        checks.append(self._check_provision_devices())
 
         if self.args.json:
             print(json.dumps(checks, indent=2))
@@ -974,6 +1021,26 @@ class App:
         if data_dir:
             roots.append(data_dir)
         return [str(Path(r).expanduser()).rstrip("/") for r in roots if r]
+
+    def _check_provision_devices(self) -> dict:
+        section = (self.conf.get("provision") or {}).get("pi")
+        if not section:
+            return self._check("provision devices", "SKIP", "no [provision.pi] in this config")
+        devices = [d for d in section.get("devices") or [] if d]
+        if not devices or any(is_placeholder(d) for d in devices):
+            return self._check(
+                "provision devices", "WARN", "no disks chosen for the mirror",
+                "run `homelab config` on this host to pick them, or set [provision.pi] devices",
+            )
+        missing = [d for d in devices if not Path(d).exists()]
+        if missing:
+            return self._check(
+                "provision devices", "FAIL", "missing: " + ", ".join(missing),
+                "check `ls -l /dev/disk/by-id/`: by-id names change when a disk is moved",
+            )
+        return self._check(
+            "provision devices", "OK", f"{len(devices)} disks: {', '.join(devices)}"
+        )
 
     def _check_secret_coverage(self) -> dict:
         env_files = [d / ENV_FILE for d in self.dirs.values() if (d / ENV_FILE).is_file()]
@@ -1545,6 +1612,68 @@ WantedBy=timers.target
 # ------------------------------------------------------------------ provision
 
 
+DISK_BY_ID_DIR = Path("/dev/disk/by-id")
+MOUNTS_FILE = Path("/proc/mounts")
+
+
+def _size_label(disk: str) -> str:
+    try:
+        sectors = int(Path(f"/sys/block/{disk}/size").read_text().strip())
+    except (OSError, ValueError):
+        return "unknown size"
+    return f"{sectors * 512 / 1e9:.0f} GB"
+
+
+def _has_mounted_child(disk_path: str, sources) -> bool:
+    for source in sources:
+        if not source.startswith("/"):
+            continue
+        real = os.path.realpath(source)
+        if real == disk_path:
+            return True
+        if real.startswith(disk_path):
+            tail = real[len(disk_path):]
+            if tail and (tail[0].isdigit() or (tail[0] == "p" and tail[1:].isdigit())):
+                return True
+    return False
+
+
+def discover_disks(by_id: Path | None = None, mounts: Path | None = None) -> list:
+    """Whole disks that could join a new mirror, as stable by-id paths."""
+    by_id = Path(by_id or DISK_BY_ID_DIR)
+    mounts = Path(mounts or MOUNTS_FILE)
+    if not by_id.is_dir():
+        return []
+    sources, root_source = [], ""
+    if mounts.is_file():
+        for line in mounts.read_text().splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            sources.append(parts[0])
+            if len(parts) > 1 and parts[1] == "/":
+                root_source = parts[0]
+    root_real = os.path.realpath(root_source) if root_source else ""
+    found, seen = [], set()
+    for entry in sorted(by_id.iterdir()):
+        name = entry.name
+        if "-part" in name or name.startswith(("dm-", "md-", "loop")):
+            continue
+        try:
+            real = os.path.realpath(entry)
+        except OSError:
+            continue
+        if not Path(real).exists() or real in seen:
+            continue
+        if root_real and real == root_real:
+            continue
+        if _has_mounted_child(real, sources):
+            continue
+        seen.add(real)
+        found.append({"id": str(entry), "device": real, "size": _size_label(Path(real).name)})
+    return found
+
+
 def validate_pi_devices(devices, sh: Shell) -> list:
     """Problems that make it unsafe to put these devices into a new array."""
     problems = []
@@ -1661,7 +1790,8 @@ class PiProvisioner:
     def run(self) -> int:
         if len(self.devices) != 2:
             raise HomelabError(
-                'set [provision.pi] devices = ["/dev/disk/by-id/...", "..."] in homelab.toml'
+                'run `homelab config` on this host to pick them, or set '
+                '[provision.pi] devices = ["/dev/disk/by-id/...", "..."] in homelab.toml'
             )
         problems = validate_pi_devices(self.devices, self.sh)
         plan = self.steps()

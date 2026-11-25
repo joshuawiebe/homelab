@@ -235,8 +235,14 @@ ls -l /dev/disk/by-id/          # note the two SSDs
 > disks, and that means wiping them. Until `homelab snapshot extract` has put a file back on
 > the NUC, the Pi's SSD is your only copy of everything.
 
-Edit `[provision.pi] devices` in `hosts/pi/homelab.toml`, then read the plan before you run
-it:
+Pick the two disks with the config script - it lists whole disks that are not the root disk
+and not mounted, and writes the by-id paths into `[provision.pi] devices`:
+
+```bash
+sudo homelab --conf hosts/pi/homelab.toml config
+```
+
+Then read the plan before you run it:
 
 ```bash
 homelab --conf hosts/pi/homelab.toml provision pi            # prints, touches nothing

@@ -2,6 +2,28 @@
 
 All notable changes to this repository. Versions match `homelab --version` and the git tag.
 
+## [1.1.0] - 2026-11-25
+
+### Added
+
+- `homelab config` now picks the Pi's mirror disks: it lists whole disks that are neither the
+  root disk nor mounted, and writes the chosen by-id paths into `[provision.pi] devices`. The
+  committed config stays generic, so the repo works on any Pi and not just the author's.
+- `doctor` gains a "provision devices" check: warns while nothing is chosen, fails when a
+  configured by-id path no longer exists (disks do get renamed when moved).
+
+### Removed
+
+- **`zoraxy`.** It was a second reverse proxy with its own ACME client, competing with Traefik
+  for 80/443 and issuing certificates from a second store. Traefik owns TLS; one proxy is the
+  whole point.
+
+### Changed
+
+- `hosts/pi/homelab.toml` ships `devices = []` instead of placeholder paths.
+- README gains a "Choosing an OS" section: Debian 13 minimal for the Proxmox VM, Raspberry Pi
+  OS Lite 64-bit for the Pi, and why.
+
 ## [1.0.0] - 2026-11-25
 
 First tagged release. The `homelab` CLI replaces the `.automations/*.sh` scripts and the

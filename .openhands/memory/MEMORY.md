@@ -2,7 +2,8 @@
 
 ## Shape
 - Docker Compose stack, one folder per service under `services/`: traefik, nextcloud, vaultwarden,
-  adguard_home, gotify, uptime_kuma, watchtower, zoraxy.
+  adguard_home, gotify, uptime_kuma, watchtower. `zoraxy` was removed in 1.1.0 (Traefik owns
+  80/443 and TLS; a second proxy with its own ACME store was the problem, not the solution).
 - `bin/homelab` is the single entry point: a ~1200-line, stdlib-only Python 3.11+ CLI
   (up/down/restart/status/logs/urls/config/doctor/snapshot/provision/install).
   `.automations/*.sh` are 3-line shims; `auto_backup/` was deleted as superseded.
@@ -87,3 +88,16 @@
 - lego has a native `ipv64` provider (since v4.13): `dnschallenge.provider=ipv64` +
   `IPV64_API_KEY`, no inbound port needed. Both hosts share one WAN IP, so a cutover moves
   the port forward, not the DNS record.
+
+## Repo must stay generic (user's explicit requirement, Nov 2026)
+- Nothing machine-specific is committed: `[provision.pi] devices` ships empty and
+  `homelab config` fills it. It lists whole disks from `/dev/disk/by-id` that are not the root
+  disk, not mounted and not a partition, then writes the picked by-id paths back with a regex
+  that only replaces the `devices =` line (comments survive; TOML re-parsed after write).
+- Discovery is testable without real disks: `DISK_BY_ID_DIR` and `MOUNTS_FILE` are module
+  globals in `bin/homelab`; tests swap them for temp dirs. The root disk comes from the `/`
+  line of the *injected* mounts file, not `/proc/mounts`.
+- OS picks documented in the README: Debian 13 (trixie) netinst for the Proxmox VM (verified
+  `debian-cd/current` serves 13.8.0), Raspberry Pi OS Lite 64-bit for the Pi. The debian.org
+  releases page in this sandbox still claims 12 Bookworm is stable — cdimage is the reliable
+  source.
