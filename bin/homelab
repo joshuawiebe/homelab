@@ -1163,6 +1163,8 @@ class App:
     def cmd_snapshot(self) -> int:
         action = self.args.action
         conf = self.snapshot_conf()
+        if action == "init":
+            return self._snapshot_init(conf)
         if action == "install":
             return self._snapshot_install(conf)
         if action == "uninstall":
@@ -1279,17 +1281,56 @@ class App:
     def _unit_dir(self) -> Path:
         return Path("/etc/systemd/system")
 
+    def _conf_path(self) -> Path:
+        explicit = getattr(self.args, "conf", None)
+        if explicit:
+            return Path(explicit).expanduser()
+        return Path(os.environ.get("HOMELAB_CONF") or self.root / CONF_NAME).expanduser()
+
+    def _snapshot_init(self, conf: dict) -> int:
+        targets = [("main", conf.get("repo"), conf.get("password_file"))]
+        for copy in conf.get("copies") or []:
+            targets.append((str(copy.get("name")), copy.get("repo"), copy.get("password_file")))
+        for name, repo, password_file in targets:
+            if not repo:
+                raise HomelabError(f"{name}: repo is not set in homelab.toml")
+            if password_file and not Path(password_file).is_file():
+                print(f"  {name}: creating {password_file} (mode 600)")
+                if not self.sh.dry_run:
+                    path = Path(password_file)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(secrets.token_urlsafe(32) + "\n")
+                    path.chmod(0o600)
+            args = ["restic", "--repo", repo]
+            if password_file:
+                args += ["--password-file", password_file]
+            if self.sh.dry_run:
+                self.sh.run([*args, "init"])
+                continue
+            if self.sh.run([*args, "cat", "config"], check=False).ok:
+                print(f"  {name}: {repo} is already initialised")
+                continue
+            self.sh.run([*args, "init"], capture=False)
+            print(f"  {name}: initialised {repo}")
+        print(
+            "\nput every passphrase in your password manager now: a repository without its\n"
+            "passphrase cannot be opened by anyone, including you"
+        )
+        return 0
+
     def _snapshot_install(self, conf: dict) -> int:
         if not self.sh.dry_run and os.geteuid() != 0:
             raise HomelabError("snapshot install writes systemd units; run it as root")
         schedule = conf.get("schedule", "*-*-* 02:30:00")
-        script = Path("/usr/local/bin/homelab")
+        script = Path(shutil.which("homelab") or sys.argv[0]).resolve()
+        # systemd does not inherit HOMELAB_CONF, and the Pi's config is not <root>/homelab.toml
+        conf_path = self._conf_path().resolve()
         service = f"""[Unit]
 Description=homelab snapshot
 
 [Service]
 Type=oneshot
-ExecStart={script} --root {self.root} snapshot run
+ExecStart={script} --root {self.root} --conf {conf_path} snapshot run
 """
         timer = f"""[Unit]
 Description=homelab snapshot timer
@@ -1302,6 +1343,11 @@ RandomizedDelaySec=5m
 [Install]
 WantedBy=timers.target
 """
+        if self.sh.dry_run:
+            print(service)
+            print(timer)
+            print(f"would install homelab-snapshot.timer ({schedule})")
+            return 0
         unit_dir = self._unit_dir()
         (unit_dir / "homelab-snapshot.service").write_text(service)
         (unit_dir / "homelab-snapshot.timer").write_text(timer)
@@ -1781,7 +1827,8 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument(
         "action",
         choices=[
-            "run", "list", "verify", "extract", "stats", "copy", "install", "uninstall",
+            "init", "run", "list", "verify", "extract", "stats", "copy", "install",
+            "uninstall",
         ],
     )
     snapshot.add_argument("snapshot", nargs="?", help="snapshot id for extract")

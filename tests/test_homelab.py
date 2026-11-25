@@ -408,6 +408,80 @@ class HostTests(unittest.TestCase):
         self.assertIn("unknown service(s): ap", err)
 
 
+class SnapshotInitTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        self.pw = self.repo.dir / "secrets"
+        (self.repo.dir / "homelab.toml").write_text(
+            '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
+            f'password_file = "{self.pw}/main.pw"\nsource = "/srv/homelab"\n'
+            "[[snapshot.copies]]\n"
+            'name = "cold"\nrepo = "/srv/cold/restic"\n'
+            f'password_file = "{self.pw}/cold.pw"\n'
+        )
+        self.path = os.environ["PATH"]
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", self.path))
+
+    def stub_restic(self, initialised=False):
+        bindir = Path(tempfile.mkdtemp(prefix="homelab-bin-"))
+        self.addCleanup(shutil.rmtree, bindir, True)
+        log = bindir / "restic.log"
+        script = bindir / "restic"
+        code = 0 if initialised else 1
+        script.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            f'case "$*" in *"cat config"*) exit {code} ;; esac\n'
+            "exit 0\n"
+        )
+        script.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{self.path}"
+        return log
+
+    def test_init_creates_one_passphrase_per_repo(self):
+        log = self.stub_restic()
+        code, out, err = run_cli(["--root", str(self.repo.dir), "snapshot", "init"])
+        self.assertEqual(code, 0, out + err)
+        main_pw, cold_pw = self.pw / "main.pw", self.pw / "cold.pw"
+        self.assertTrue(main_pw.is_file() and cold_pw.is_file())
+        self.assertEqual(stat.S_IMODE(main_pw.stat().st_mode), 0o600)
+        self.assertNotEqual(main_pw.read_text(), cold_pw.read_text())
+        calls = log.read_text().splitlines()
+        self.assertIn("--repo /srv/repo/restic", " ".join(calls))
+        self.assertIn("--repo /srv/cold/restic", " ".join(calls))
+        self.assertTrue([line for line in calls if line.endswith("init")])
+
+    def test_init_leaves_an_existing_repo_and_passphrase_alone(self):
+        self.pw.mkdir(parents=True)
+        (self.pw / "main.pw").write_text("existing\n")
+        log = self.stub_restic(initialised=True)
+        code, out, _ = run_cli(["--root", str(self.repo.dir), "snapshot", "init"])
+        self.assertEqual(code, 0)
+        self.assertEqual((self.pw / "main.pw").read_text(), "existing\n")
+        calls = log.read_text().splitlines()
+        self.assertEqual([line for line in calls if line.endswith("init")], [])
+
+    def test_dry_run_writes_nothing(self):
+        code, out, _ = run_cli(["--root", str(self.repo.dir), "snapshot", "init", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("restic --repo /srv/repo/restic", out)
+        self.assertFalse((self.pw / "main.pw").exists())
+
+    def test_installed_timer_pins_the_config_it_was_installed_with(self):
+        code, out, _ = run_cli(
+            [
+                "--root", str(self.repo.dir),
+                "--conf", str(self.repo.dir / "homelab.toml"),
+                "snapshot", "install", "--dry-run",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn(f"--conf {self.repo.dir / 'homelab.toml'}", out)
+        self.assertIn("snapshot run", out)
+        self.assertIn("OnCalendar=", out)
+
+
 class CopyTests(unittest.TestCase):
     TOML = (
         '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
