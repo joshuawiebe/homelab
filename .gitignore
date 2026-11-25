@@ -16,8 +16,6 @@ services/nextcloud/nextcloud/
 services/traefik/letsencrypt/
 services/uptime_kuma/data/
 services/vaultwarden/vw-data/
-services/zoraxy/config/
-services/zoraxy/plugin/
 
 # Ignore auto_backup .env and logs
 auto_backup/.env
