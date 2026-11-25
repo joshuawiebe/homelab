@@ -75,6 +75,7 @@ homelab config --non-interactive
 | `homelab snapshot list / verify / stats` | inspect the repository |
 | `homelab snapshot extract SNAP DIR [--include PATH]` | put files back |
 | `homelab snapshot install / uninstall` | systemd timer for the nightly run |
+| `homelab migrate data [--to DIR] [--apply]` | copy service state out of the git tree, verify it, record `DATA_DIR` |
 | `homelab provision pi [--apply] [--yes]` | build the mirrored repo on the Pi |
 | `homelab install [--prefix DIR]` | symlink the CLI into `PATH` |
 
@@ -257,8 +258,11 @@ AdGuard there needs host networking and port 53, not Traefik labels, and its UI 
 the LAN. `docs/PLAN.md` explains the whole topology, including the Proxmox VM and the
 three-copy backup chain.
 
-Container state must live outside the checkout (for example `/srv/homelab/nextcloud`),
-otherwise `git clean -xfd` deletes your data with the rest of the untracked files.
+Container state must live outside the checkout, otherwise `git clean -xfd` deletes your
+data with the rest of the untracked files. Every stateful bind mount is written as
+`${DATA_DIR:-.}/<name>`, so a service's `.env` decides where its data lives without touching
+the compose file, and `homelab migrate data --to /srv/homelab --apply` does the move and
+verifies it.
 
 ---
 

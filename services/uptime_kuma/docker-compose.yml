@@ -5,7 +5,7 @@ services:
     hostname: uptime_kuma
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-.}/data:/app/data
     networks:
       - proxy
     labels:

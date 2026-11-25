@@ -8,8 +8,8 @@ services:
       - "53:53/tcp"
       - "53:53/udp"
     volumes:
-      - ./work:/opt/adguardhome/work
-      - ./conf:/opt/adguardhome/conf
+      - ${DATA_DIR:-.}/work:/opt/adguardhome/work
+      - ${DATA_DIR:-.}/conf:/opt/adguardhome/conf
     environment:
       - TZ=Europe/Berlin
     networks:

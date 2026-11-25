@@ -621,6 +621,146 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(homelab.service_profiles(block.parent), ["a", "b"])
 
 
+class MigrateTests(unittest.TestCase):
+    COMPOSE = """services:
+  app:
+    image: ${APP_IMAGE:-example/app:latest}
+    volumes:
+      - ${DATA_DIR:-.}/data:/var/lib/app
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "8080:80"
+"""
+
+    def setUp(self):
+        self.repo = TempRepo({"app": self.COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        self.target = Path(tempfile.mkdtemp(prefix="homelab-srv-"))
+        self.addCleanup(shutil.rmtree, self.target, True)
+        self.path = os.environ["PATH"]
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", self.path))
+        self.src = self.repo.dir / "services" / "app" / "data"
+
+    def stub_rsync(self, verify_output=""):
+        """A stand-in rsync: copies on a real run, prints on --dry-run."""
+        bindir = Path(tempfile.mkdtemp(prefix="homelab-bin-"))
+        self.addCleanup(shutil.rmtree, bindir, True)
+        script = bindir / "rsync"
+        script.write_text(
+            "#!/bin/sh\n"
+            'for a in "$@"; do\n'
+            f'  if [ "$a" = "--dry-run" ]; then echo "{verify_output}"; exit 0; fi\n'
+            "done\n"
+            'src=""; dst=""\n'
+            'for a in "$@"; do src="$dst"; dst="$a"; done\n'
+            'cp -a "${src}." "$dst"\n'
+        )
+        script.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{self.path}"
+
+    def seed(self):
+        self.src.mkdir(parents=True)
+        (self.src / "x.txt").write_text("hi")
+
+    def test_interpolate_prefers_env_then_default(self):
+        self.assertEqual(homelab.interpolate("${A:-x}", {}), "x")
+        self.assertEqual(homelab.interpolate("${A:-x}", {"A": "y"}), "y")
+        self.assertEqual(homelab.interpolate("${A:-x}", {"A": ""}), "x")
+        self.assertEqual(homelab.interpolate("${A}", {"A": "z"}), "z")
+
+    def test_bind_sources_skips_socket_host_config_and_ports(self):
+        svc = self.repo.dir / "services" / "app"
+        found = homelab.bind_sources(svc, {})
+        self.assertEqual([path.name for path, _ in found], ["data"])
+        self.assertEqual(found[0][1], "/var/lib/app")
+
+    def test_missing_destination_is_an_error(self):
+        code, out, err = run_cli(["--root", str(self.repo.dir), "migrate", "data"])
+        self.assertEqual(code, 1)
+        self.assertIn("no destination", err)
+
+    def test_files_are_not_migrated(self):
+        compose = self.repo.dir / "services" / "app" / "docker-compose.yml"
+        compose.write_text(self.COMPOSE.replace('"8080:80"', "./acme.json:/acme.json"))
+        (self.repo.dir / "services" / "app" / "acme.json").write_text("{}")
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--to", str(self.target)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to move", out)
+
+    def test_plan_lists_the_move_and_copies_nothing(self):
+        self.seed()
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--to", str(self.target)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("this was a plan", out)
+        self.assertIn(str(self.target / "app" / "data"), out)
+        self.assertFalse((self.target / "app" / "data").exists())
+
+    def test_apply_copies_verifies_and_records_data_dir(self):
+        self.seed()
+        self.stub_rsync()
+        code, out, err = run_cli(
+            [
+                "--root", str(self.repo.dir),
+                "migrate", "data", "--to", str(self.target),
+                "--apply",
+            ]
+        )
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual((self.target / "app" / "data" / "x.txt").read_text(), "hi")
+        self.assertIn("verified", out)
+        env = homelab.read_env(self.repo.dir / "services" / "app" / ".env")
+        self.assertEqual(env["DATA_DIR"], str(self.target / "app"))
+
+    def test_apply_refuses_a_copy_that_does_not_match(self):
+        self.seed()
+        self.stub_rsync(verify_output=">f.stage x.txt")
+        code, out, err = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--to", str(self.target), "--apply"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("does not match", err)
+
+    def test_state_already_under_the_target_is_left_alone(self):
+        self.repo.add_env("app", {"DATA_DIR": str(self.target / "app")})
+        (self.target / "app" / "data").mkdir(parents=True)
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--to", str(self.target)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("already under", out)
+        self.assertIn("nothing to move", out)
+
+
+class MigrateScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo(
+            {
+                "app": MigrateTests.COMPOSE,
+                "edge": PROXY_COMPOSE.replace(
+                    "image: ${PROXY_IMAGE:-traefik:latest}",
+                    "image: ${PROXY_IMAGE:-traefik:latest}\n    volumes:\n      - ./letsencrypt:/letsencrypt",
+                ),
+            }
+        )
+        self.addCleanup(self.repo.cleanup)
+        self.target = Path(tempfile.mkdtemp(prefix="homelab-srv-"))
+        self.addCleanup(shutil.rmtree, self.target, True)
+
+    def test_a_service_without_data_dir_is_left_alone(self):
+        (self.repo.dir / "services" / "edge" / "letsencrypt").mkdir()
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--to", str(self.target)]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("leaving edge alone", out)
+        self.assertNotIn("letsencrypt", out.split("nothing to move")[0])
+
+
 class RealRepoTests(unittest.TestCase):
 
     def test_every_compose_file_parses(self):

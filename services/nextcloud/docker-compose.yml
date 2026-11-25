@@ -5,7 +5,7 @@ services:
     hostname: nextcloud
     restart: always
     volumes:
-      - ./nextcloud:/var/www/html
+      - ${DATA_DIR:-.}/nextcloud:/var/www/html
     environment:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=nextcloud
@@ -40,7 +40,7 @@ services:
     hostname: nextcloud_cron
     restart: always
     volumes:
-      - ./nextcloud:/var/www/html
+      - ${DATA_DIR:-.}/nextcloud:/var/www/html
     entrypoint: /cron.sh
     depends_on:
       - nextcloud
@@ -60,7 +60,7 @@ services:
       start_period: 60s
     command: --transaction-isolation=READ-COMMITTED
     volumes:
-      - ./db:/var/lib/mysql
+      - ${DATA_DIR:-.}/db:/var/lib/mysql
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}

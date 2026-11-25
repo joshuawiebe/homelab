@@ -105,7 +105,41 @@ password manager. A restic repository without its passphrase is a random binary 
 
 Each phase ends in something you can use. Do not skip ahead.
 
-### Phase 0 - NUC: Proxmox (half a day)
+### Phase 0 - cut over from the Pi (an afternoon)
+
+The Pi is the current primary, its data sits inside the checkout, and a USB stick holds the
+only copy. Do this in one sitting, in this order, and nothing is lost.
+
+1. **Freeze the old stack.** On the Pi: `homelab down`. No writes after this point.
+2. **Lift the data out of the git tree**, so it can be copied as plain directories:
+
+   ```bash
+   sudo homelab migrate data --to /srv/homelab --apply
+   ```
+
+   It plans first, copies with `rsync` (never deletes), verifies the copy with a dry-run
+   diff, and records `DATA_DIR=/srv/homelab/<service>` in each service `.env`. Services whose
+   compose file does not use `DATA_DIR` (traefik, for example) are named and left alone: a
+   copy they would not read is worse than no copy.
+3. **Copy Pi to NUC.** From the NUC, once `/srv` is mounted there:
+
+   ```bash
+   sudo rsync -a --numeric-ids -e ssh pi.lan:/srv/homelab/ /srv/homelab/
+   ```
+
+   `--numeric-ids` matters: Nextcloud and MariaDB run as uid 33 and 999, and a name-based
+   copy silently rewrites ownership when those users do not exist on the target.
+4. **Start the NUC stack** (`homelab config`, `homelab doctor`, `homelab up`) and check the
+   three things that always break: Nextcloud login, Vaultwarden login, AdGuard answering on
+   53.
+5. **Move DNS and the port forwards** to the NUC. Keep the Pi's AdGuard running until the
+   NUC answers queries, then stop it.
+6. **Do not wipe anything yet.** Leave the Pi's old data and the USB stick untouched for a
+   week. They are the only copy until the new chain has produced and verified one.
+
+Only after that does the Pi get repurposed as the backup box (phases 3 to 5).
+
+### Phase 1 - NUC: Proxmox (half a day)
 
 1. Install Proxmox 8 from USB. Hostname `nuc`, static address or DHCP reservation.
 2. Post-install, as root. The community-scripts helper is convenient; read it first, then
@@ -151,7 +185,7 @@ Each phase ends in something you can use. Do not skip ahead.
    homelab up
    ```
 
-### Phase 1 - NUC: data where it belongs (an hour)
+### Phase 2 - NUC: data where it belongs (an hour)
 
 1. Format and mount the passthrough disk:
 
@@ -167,7 +201,7 @@ Each phase ends in something you can use. Do not skip ahead.
 4. `homelab doctor` must say `data location: OK`. If it warns, something is still writing
    inside the git tree, and `git clean -xfd` would eat it.
 
-### Phase 2 - Pi: storage (an hour, once)
+### Phase 3 - Pi: storage (an hour, once)
 
 ```bash
 sudo apt install -y mdadm lvm2 rsync restic sqlite3
@@ -193,7 +227,7 @@ Then:
 homelab --conf hosts/pi/homelab.toml doctor
 ```
 
-### Phase 3 - Pi: services (half a day)
+### Phase 4 - Pi: services (half a day)
 
 ```bash
 homelab --conf hosts/pi/homelab.toml up        # adguard, uptime-kuma, gotify
@@ -209,7 +243,7 @@ homelab --conf hosts/pi/homelab.toml status
 4. Optional: `docker compose --profile vpn up -d` for Tailscale, then approve the advertised
    route in the admin console.
 
-### Phase 4 - Pi: pull and snapshot (half a day)
+### Phase 5 - Pi: pull and snapshot (half a day)
 
 The Pi pulls; the NUC never pushes.
 
@@ -275,7 +309,7 @@ sudo homelab --conf hosts/pi/homelab.toml snapshot install
 systemctl list-timers 'homelab-*'
 ```
 
-### Phase 5 - three copies (an hour, then a night)
+### Phase 6 - three copies (an hour, then a night)
 
 ```bash
 # on the Pi, once per repository
@@ -297,7 +331,7 @@ restic -r <target> forget --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --pr
 carries `limit_upload = 30000` (KiB/s) so a snapshot does not saturate your uplink. Use a
 different passphrase per repository.
 
-### Phase 6 - prove it (an hour, every quarter)
+### Phase 7 - prove it (an hour, every quarter)
 
 ```bash
 homelab snapshot list
@@ -328,8 +362,9 @@ calendar.
   for LAN clients.
 * **How much data?** It decides whether a Storage Box BX11 (1 TB) is enough or you need
   BX21. Under 500 GB, BX11 with the retention above fits comfortably.
-* **Why is the server off now?** If it is noise, put the NUC somewhere with a door. If it is
-  the power bill, the Pi already covers the always-on parts.
+* **What happens to the USB stick?** Retire it once the three-copy chain has been verified
+  once. It was a single, unversioned copy on flash, which is exactly the failure this design
+  removes, but until the new chain works it is still the only copy.
 * **Do you want a second DNS on the NUC?** `adguard_home` stays in `[hosts.nuc]` for exactly
   that, but it doubles the blocklist maintenance. The alternative is `dnsmasq` on the NUC
   pointing at the Pi.

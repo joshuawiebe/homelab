@@ -8,7 +8,7 @@ services:
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - DOMAIN=${DOMAIN}
     volumes:
-      - ./vw-data:/data/
+      - ${DATA_DIR:-.}/vw-data:/data/
     networks:
       - proxy
     labels:

@@ -5,7 +5,7 @@ services:
     hostname: gotify
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-.}/data:/app/data
     environment:
       - TZ=Europe/Berlin
     networks:

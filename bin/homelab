@@ -258,6 +258,35 @@ def service_profiles(path: Path) -> list:
     return found
 
 
+def interpolate(text: str, env: dict) -> str:
+    """Resolve ${VAR} and ${VAR:-default} the way compose would, without compose."""
+
+    def repl(match):
+        return env.get(match.group(1), "") or (match.group(2) or "")
+
+    return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", repl, text)
+
+
+def bind_sources(svc_dir: Path, env: dict) -> list:
+    """Host paths a service bind-mounts, minus sockets and host config files."""
+    found = {}
+    for line in compose_text(svc_dir).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        spec = interpolate(stripped[2:].strip().strip('"').strip("'"), env)
+        host, sep, container = spec.partition(":")
+        if not sep or not host.startswith(("/", ".")):
+            continue
+        if host == "/var/run/docker.sock" or host.startswith(("/etc/", "/dev/")):
+            continue
+        path = Path(host)
+        if not path.is_absolute():
+            path = (svc_dir / path).resolve()
+        found[str(path)] = container.split(":")[0]
+    return [(Path(host), container) for host, container in sorted(found.items())]
+
+
 def publishes_443(path: Path) -> bool:
     text = compose_text(path)
     return bool(re.search(r'"443:443"', text)) or bool(re.search(r"'443:443'", text))
@@ -1188,6 +1217,70 @@ WantedBy=timers.target
         return 0
 
     # -- provision --------------------------------------------------------
+    def cmd_migrate(self) -> int:
+        if self.args.what != "data":
+            raise HomelabError("only `migrate data` is implemented")
+        return self._migrate_data()
+
+    def _migrate_data(self) -> int:
+        raw = self.args.to or self.conf.get("general", {}).get("data_dir")
+        if not raw:
+            raise HomelabError(
+                "no destination: pass --to DIR or set [general] data_dir in homelab.toml"
+            )
+        target_root = Path(raw).expanduser()
+        if self.args.apply and not shutil.which("rsync"):
+            raise HomelabError("rsync is not installed; `apt install rsync` first")
+        moves = []
+        skipped = []
+        for name in self.selected(self.args.services):
+            svc_dir = self.dirs[name]
+            if "DATA_DIR" not in compose_text(svc_dir):
+                skipped.append(name)
+                continue
+            env = read_env(svc_dir / ENV_FILE)
+            for source, container in bind_sources(svc_dir, env):
+                if target_root in source.parents:
+                    print(f"  {name}: {source} already under {target_root}")
+                    continue
+                if not source.is_dir():
+                    continue
+                moves.append((name, source, target_root / name / source.name, container))
+        if skipped:
+            print(
+                f"  leaving {', '.join(skipped)} alone: their compose files do not use "
+                f"DATA_DIR, so a copy would not be picked up\n"
+            )
+        if not moves:
+            print(f"nothing to move: no service state outside {target_root}")
+            return 0
+        print(f"state to move into {target_root}:\n")
+        for name, source, destination, container in moves:
+            print(f"  {name}: {source}\n      -> {destination}")
+        if not self.args.apply:
+            print("\nthis was a plan; re-run with --apply to copy")
+            return 0
+        for name, source, destination, container in moves:
+            destination.mkdir(parents=True, exist_ok=True)
+            self.sh.run(["rsync", "-a", f"{source}/", f"{destination}/"])
+            diff = self.sh.run(
+                ["rsync", "-a", "--dry-run", "--itemize-changes", f"{source}/", f"{destination}/"]
+            )
+            if diff.out.strip():
+                raise HomelabError(f"{source} does not match its copy: {diff.out.strip()[:200]}")
+            print(f"  {name}: {destination} verified")
+        # the copy is inert unless the service points at it, so record it here
+        for name in sorted({move[0] for move in moves}):
+            env_path = self.dirs[name] / ENV_FILE
+            values = read_env(env_path)
+            values["DATA_DIR"] = str(target_root / name)
+            write_env(env_path, values)
+            print(f"  {name}: DATA_DIR={target_root / name}")
+        count = len(moves)
+        noun = "directory" if count == 1 else "directories"
+        print(f"\ncopied and verified {count} state {noun}; restart with `homelab up`")
+        return 0
+
     def cmd_provision(self) -> int:
         if self.args.target != "pi":
             raise HomelabError(
@@ -1577,6 +1670,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     snapshot.add_argument("--dry-run", action="store_true")
 
+    migrate = subs.add_parser("migrate", help="move container state out of the git tree")
+    migrate.add_argument("what", choices=["data"])
+    migrate.add_argument("services", nargs="*", help="only these services")
+    migrate.add_argument("--to", help="destination root (default: [general] data_dir)")
+    migrate.add_argument("--apply", action="store_true", help="copy, do not just print")
+    migrate.add_argument("--dry-run", action="store_true")
+
     provision = subs.add_parser("provision", help="bootstrap a host (pi mirror + repo)")
     provision.add_argument("target", choices=["pi"])
     provision.add_argument("--apply", action="store_true", help="execute, not just print")
@@ -1602,6 +1702,7 @@ COMMANDS = {
     "config": "cmd_config",
     "doctor": "cmd_doctor",
     "snapshot": "cmd_snapshot",
+    "migrate": "cmd_migrate",
     "provision": "cmd_provision",
     "install": "cmd_install",
     "uninstall": "cmd_uninstall",
