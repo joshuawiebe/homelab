@@ -107,37 +107,50 @@ Each phase ends in something you can use. Do not skip ahead.
 
 ### Phase 0 - cut over from the Pi (an afternoon)
 
-The Pi is the current primary, its data sits inside the checkout, and a USB stick holds the
-only copy. Do this in one sitting, in this order, and nothing is lost.
+Your layout today: **the repo and every service's data are on the SSD**, the OS and
+`/var/lib/docker` are on the microSD. Two consequences, both easy to get wrong:
+
+* the checkout *is* the data, so `git clean -xfd` on the Pi deletes Nextcloud. Never run it
+  there.
+* nothing needs to be copied within the Pi, and copying into `/srv` on the same disk would
+  double the space used. Copy **straight from the Pi to the NUC**.
 
 1. **Freeze the old stack.** On the Pi: `homelab down`. No writes after this point.
-2. **Lift the data out of the git tree**, so it can be copied as plain directories:
+2. **On the NUC**, clone this repo, then pull the state over ssh in one verified step:
 
    ```bash
-   sudo homelab migrate data --to /srv/homelab --apply
+   sudo homelab migrate data --from pi.lan:/opt/homelab --to /srv/homelab --apply
    ```
 
-   It plans first, copies with `rsync` (never deletes), verifies the copy with a dry-run
-   diff, and records `DATA_DIR=/srv/homelab/<service>` in each service `.env`. Services whose
-   compose file does not use `DATA_DIR` (traefik, for example) are named and left alone: a
-   copy they would not read is worse than no copy.
-3. **Copy Pi to NUC.** From the NUC, once `/srv` is mounted there:
+   `--from` reads the compose files *here*, maps each bind mount to the same relative path
+   under the Pi's checkout, copies with `rsync` (never deletes), verifies every copy with a
+   dry-run itemize diff, and records `DATA_DIR` here. Nothing on the Pi is written to, so it
+   stays a working fallback.
+
+   Replace `/opt/homelab` with wherever the Pi keeps its checkout (`pwd` on the Pi).
+3. **Carry the secrets.** They are gitignored, so a fresh clone does not have them:
 
    ```bash
-   sudo rsync -a --numeric-ids -e ssh pi.lan:/srv/homelab/ /srv/homelab/
+   rsync -a --numeric-ids --include='*/' --include='.env' --include='users' --exclude='*' \
+     pi.lan:/opt/homelab/services/ ./services/
    ```
 
-   `--numeric-ids` matters: Nextcloud and MariaDB run as uid 33 and 999, and a name-based
-   copy silently rewrites ownership when those users do not exist on the target.
+   Do this **before** `homelab config`. If `config` generates fresh secrets, the Nextcloud
+   database and its `MYSQL_PASSWORD` no longer match and the app refuses to start. Add
+   `--include='letsencrypt'` if you also want the existing certificates; otherwise Let's
+   Encrypt re-issues them, which is fine once.
 4. **Start the NUC stack** (`homelab config`, `homelab doctor`, `homelab up`) and check the
    three things that always break: Nextcloud login, Vaultwarden login, AdGuard answering on
-   53.
-5. **Move DNS and the port forwards** to the NUC. Keep the Pi's AdGuard running until the
-   NUC answers queries, then stop it.
-6. **Do not wipe anything yet.** Leave the Pi's old data and the USB stick untouched for a
-   week. They are the only copy until the new chain has produced and verified one.
+   53. `doctor` must say `data location: OK` and `named volumes: OK` - the second one means
+   no state is hiding in `/var/lib/docker` (which on the Pi is the microSD).
+5. **Move DNS and the port forwards** to the NUC. Keep the Pi's AdGuard answering until the
+   NUC does.
+6. **Do not wipe anything for a week.** The Pi's in-tree data and the USB stick are your only
+   copy until the new chain has produced and verified one.
 
-Only after that does the Pi get repurposed as the backup box (phases 3 to 5).
+Only after that does the Pi get repurposed as the backup box (phases 3 to 5). Its microSD
+then holds an OS and a few container images, so cap the container logs (the compose files in
+`hosts/pi/services/` already do) or the card writes itself to death.
 
 ### Phase 1 - NUC: Proxmox (half a day)
 

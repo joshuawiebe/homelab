@@ -1,6 +1,14 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   nextcloud:
     image: ${NEXTCLOUD_IMAGE:-nextcloud}
+    logging: *default-logging
     container_name: nextcloud
     hostname: nextcloud
     restart: always
@@ -36,6 +44,7 @@ services:
 
   cron:
     image: ${NEXTCLOUD_IMAGE:-nextcloud}
+    logging: *default-logging
     container_name: nextcloud_cron
     hostname: nextcloud_cron
     restart: always
@@ -49,6 +58,7 @@ services:
 
   db:
     image: ${MARIADB_IMAGE:-mariadb:10.11}
+    logging: *default-logging
     container_name: db
     hostname: db
     restart: always
@@ -71,6 +81,7 @@ services:
 
   redis:
     image: ${REDIS_IMAGE:-redis:alpine}
+    logging: *default-logging
     container_name: redis
     hostname: redis
     restart: always

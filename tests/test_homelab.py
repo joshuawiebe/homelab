@@ -295,10 +295,10 @@ class ConfigTests(unittest.TestCase):
         self.repo.add_template("app", "# api token\nAPP_TOKEN=\nDOMAIN=\n")
 
     def test_non_interactive_generates_secrets_and_600_env(self):
-        code, out, _ = run_cli(
+        code, out, err = run_cli(
             ["--root", str(self.repo.dir), "config", "--non-interactive"]
         )
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, err)
         env = homelab.read_env(self.repo.dir / "services" / "app" / ".env")
         self.assertTrue(env["APP_TOKEN"])
         self.assertEqual(
@@ -659,6 +659,21 @@ class MigrateTests(unittest.TestCase):
         script.chmod(0o755)
         os.environ["PATH"] = f"{bindir}:{self.path}"
 
+    def recording_rsync(self):
+        """A stand-in rsync that records its argv and succeeds."""
+        bindir = Path(tempfile.mkdtemp(prefix="homelab-bin-"))
+        self.addCleanup(shutil.rmtree, bindir, True)
+        log = bindir / "calls.log"
+        script = bindir / "rsync"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            "exit 0\n"
+        )
+        script.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{self.path}"
+        return log
+
     def seed(self):
         self.src.mkdir(parents=True)
         (self.src / "x.txt").write_text("hi")
@@ -725,6 +740,40 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("does not match", err)
 
+    def test_from_remote_copies_from_the_remote_checkout(self):
+        log = self.recording_rsync()
+        code, out, err = run_cli(
+            [
+                "--root", str(self.repo.dir), "migrate", "data",
+                "--from", "pi.lan:/opt/homelab", "--to", str(self.target), "--apply",
+            ]
+        )
+        self.assertEqual(code, 0, out + err)
+        calls = log.read_text().splitlines()
+        copy = [call for call in calls if "--dry-run" not in call]
+        self.assertEqual(len(copy), 1, calls)
+        self.assertIn("pi.lan:/opt/homelab/services/app/data/", copy[0])
+        self.assertIn("--numeric-ids", copy[0])
+
+    def test_from_plan_shows_the_remote_path(self):
+        code, out, _ = run_cli(
+            [
+                "--root", str(self.repo.dir), "migrate", "data",
+                "--from", "pi.lan:/opt/homelab", "--to", str(self.target),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("pi.lan:/opt/homelab/services/app/data", out)
+        self.assertIn("this was a plan", out)
+
+    def test_from_needs_a_remote_root(self):
+        code, out, err = run_cli(
+            ["--root", str(self.repo.dir), "migrate", "data", "--from", "pi.lan",
+             "--to", str(self.target)]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("HOST:/path/to/checkout", err)
+
     def test_state_already_under_the_target_is_left_alone(self):
         self.repo.add_env("app", {"DATA_DIR": str(self.target / "app")})
         (self.target / "app" / "data").mkdir(parents=True)
@@ -734,6 +783,63 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("already under", out)
         self.assertIn("nothing to move", out)
+
+
+class VolumeTests(unittest.TestCase):
+    NAMED = """services:
+  app:
+    image: ${APP_IMAGE:-example/app:latest}
+    volumes:
+      - dbdata:/var/lib/mysql
+    command:
+      - "--entrypoints.web.address=:80"
+      - "--no-new-privileges"
+    ports:
+      - "8080:80"
+"""
+
+    BOUND = """x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+
+services:
+  app:
+    image: ${APP_IMAGE:-example/app:latest}
+    logging: *default-logging
+    volumes:
+      - ${DATA_DIR:-.}/data:/var/lib/app
+"""
+
+    def test_named_volume_is_not_a_bind_mount(self):
+        repo = TempRepo({"app": self.NAMED})
+        self.addCleanup(repo.cleanup)
+        svc = repo.dir / "services" / "app"
+        self.assertEqual(homelab.named_volumes(svc, {}), ["dbdata"])
+        self.assertEqual(homelab.bind_sources(svc, {}), [])
+
+    def test_command_flags_are_not_mistaken_for_volumes(self):
+        repo = TempRepo({"app": self.NAMED})
+        self.addCleanup(repo.cleanup)
+        svc = repo.dir / "services" / "app"
+        self.assertNotIn("--no-new-privileges", homelab.named_volumes(svc, {}))
+        self.assertNotIn("--entrypoints.web.address=", homelab.named_volumes(svc, {}))
+
+    def test_doctor_flags_state_in_docker_root(self):
+        repo = TempRepo({"app": self.NAMED})
+        self.addCleanup(repo.cleanup)
+        _, out, _ = run_cli(["--root", str(repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["named volumes"]["status"], "WARN")
+        self.assertIn("dbdata", checks["named volumes"]["detail"])
+
+    def test_doctor_passes_with_bind_mounts_and_capped_logs(self):
+        repo = TempRepo({"app": self.BOUND})
+        self.addCleanup(repo.cleanup)
+        _, out, _ = run_cli(["--root", str(repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["named volumes"]["status"], "OK")
+        self.assertEqual(checks["log limits"]["status"], "OK")
 
 
 class MigrateScopeTests(unittest.TestCase):

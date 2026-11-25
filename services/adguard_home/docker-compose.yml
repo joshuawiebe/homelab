@@ -1,6 +1,14 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   adguard_home:
     image: ${ADGUARD_IMAGE:-adguard/adguardhome:latest}
+    logging: *default-logging
     container_name: adguard_home
     hostname: adguard_home
     restart: unless-stopped

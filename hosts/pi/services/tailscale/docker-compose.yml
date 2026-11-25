@@ -2,9 +2,17 @@
 #   docker compose --profile vpn up -d
 # then approve the advertised route in the Tailscale admin console.
 # `--accept-dns=false` keeps AdGuard as the only resolver on this host.
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   tailscale:
     image: ${TAILSCALE_IMAGE:-tailscale/tailscale:latest}
+    logging: *default-logging
     container_name: tailscale
     hostname: pi
     restart: unless-stopped

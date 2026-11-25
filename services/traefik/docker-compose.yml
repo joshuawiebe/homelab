@@ -1,6 +1,14 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   traefik:
     image: ${TRAEFIK_IMAGE:-traefik:latest}
+    logging: *default-logging
     container_name: traefik
     restart: unless-stopped
     command:

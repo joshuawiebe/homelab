@@ -1,8 +1,16 @@
 # Pi variant of Uptime Kuma: LAN only. Monitoring must not live on the host it
 # monitors, which is the whole reason this runs on the Pi instead of the NUC.
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   uptime_kuma:
     image: ${UPTIME_KUMA_IMAGE:-louislam/uptime-kuma:latest}
+    logging: *default-logging
     container_name: uptime_kuma
     hostname: uptime_kuma
     restart: unless-stopped

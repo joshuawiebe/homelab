@@ -75,7 +75,7 @@ homelab config --non-interactive
 | `homelab snapshot list / verify / stats` | inspect the repository |
 | `homelab snapshot extract SNAP DIR [--include PATH]` | put files back |
 | `homelab snapshot install / uninstall` | systemd timer for the nightly run |
-| `homelab migrate data [--to DIR] [--apply]` | copy service state out of the git tree, verify it, record `DATA_DIR` |
+| `homelab migrate data [--to DIR] [--from HOST:ROOT] [--apply]` | copy service state out of the git tree (or straight off another host), verify it, record `DATA_DIR` |
 | `homelab provision pi [--apply] [--yes]` | build the mirrored repo on the Pi |
 | `homelab install [--prefix DIR]` | symlink the CLI into `PATH` |
 
@@ -105,6 +105,8 @@ Ordered from "will not boot" to "smells":
 * host ports 80/443/53 free (`systemd-resolved` will hold 53)
 * image tags: `:latest` and untagged images are flagged
 * `docker.sock` mounted read-write (root-equivalent)
+* named volumes: state inside docker's data-root, which on a Pi is the microSD
+* unbounded `json-file` logs: they fill the disk and wear out an SD card
 * container state living inside the git tree
 * free space on `data_dir` and the snapshot repo
 * snapshot repo: present and mounted, newest snapshot younger than 36 hours, and every
