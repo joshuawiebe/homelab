@@ -221,6 +221,10 @@ sudo apt install -y mdadm lvm2 rsync restic sqlite3
 ls -l /dev/disk/by-id/          # note the two SSDs
 ```
 
+> **Stop if the NUC copy is not verified yet.** `provision pi` builds a new array on those two
+> disks, and that means wiping them. Until `homelab snapshot extract` has put a file back on
+> the NUC, the Pi's SSD is your only copy of everything.
+
 Edit `[provision.pi] devices` in `hosts/pi/homelab.toml`, then read the plan before you run
 it:
 
