@@ -6,7 +6,7 @@
 - `bin/homelab` is the single entry point: a ~1200-line, stdlib-only Python 3.11+ CLI
   (up/down/restart/status/logs/urls/config/doctor/snapshot/provision/install).
   `.automations/*.sh` are 3-line shims; `auto_backup/` was deleted as superseded.
-- Tests: `python3 -m unittest discover -s tests` — 56 tests, no docker daemon needed.
+- Tests: `python3 -m unittest discover -s tests` — 65 tests, no docker daemon needed.
 - Two hosts, one CLI: `[hosts.nuc]` / `[hosts.pi]` in `homelab.toml`, Pi stack under
   `hosts/pi/services/`. `--host NAME` filters; `HOMELAB_CONF` swaps the whole config.
 - `docs/PLAN.md` is the topology + runbook (Proxmox VM, md/LVM repo, restic copies).
@@ -42,3 +42,15 @@
 - Doctor counts only `${VAR}` references *without* a default as "needs .env"; otherwise a
   compose file that defaults every variable looks like it is missing its env file.
 - Hetzner Storage Box SFTP listens on port 23, and restic's URL carries it: `:23//path`.
+
+## Data layout (settled Nov 2026)
+- Stateful bind mounts are `${DATA_DIR:-.}/<name>`; each service `.env` sets
+  `DATA_DIR=/srv/homelab/<service>` (templates carry that default). Unset resolves to the old
+  in-tree path, so existing installs keep working.
+- `homelab migrate data --to DIR --apply` = rsync + dry-run verification + `DATA_DIR` rewrite.
+  Only services whose compose mentions `DATA_DIR` are migrated; traefik keeps `./letsencrypt`
+  and `./users` in the tree on purpose (moving them would silently re-issue certs).
+- History: the Pi was the primary with a USB stick as backup; the NUC is the new primary.
+  Cutover order lives in `docs/PLAN.md` phase 0.
+- rsync is NOT installed in the agent container (no root), so the migrate apply test uses a
+  stub `rsync` shell script on PATH that does `cp -a "${src}." "$dst"`.
