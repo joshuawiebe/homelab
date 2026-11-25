@@ -227,7 +227,7 @@ then holds an OS and a few container images, so cap the container logs (the comp
 ### Phase 3 - Pi: storage (an hour, once)
 
 ```bash
-sudo apt install -y mdadm lvm2 rsync restic sqlite3
+sudo apt install -y mdadm lvm2 rsync restic sqlite3 sshfs fuse3
 ls -l /dev/disk/by-id/          # note the two SSDs
 ```
 
@@ -319,6 +319,19 @@ systemctl enable --now srv-mnt-nuc-srv.mount
 Read-only with `reconnect` matters: if the NUC reboots, the mount comes back by itself
 instead of going silently stale, and nothing on the Pi can damage the source.
 
+Create the repositories and their passphrases, once:
+
+```bash
+sudo homelab --conf hosts/pi/homelab.toml snapshot init
+```
+
+It writes a random passphrase per repository to the configured `password_file` (mode 600) and
+runs `restic init` only where `restic cat config` fails, so re-running it is harmless. Copy
+each passphrase into your password manager before you go on: the Pi must not hold the only
+copy of the key to its own backups. `[[snapshot.copies]]` targets are initialised in the same
+pass, which matters because `restic copy --repo2` refuses to write into a repository that
+does not exist yet.
+
 Then run it by hand once:
 
 ```bash
@@ -338,14 +351,34 @@ systemctl list-timers 'homelab-*'
 
 ### Phase 6 - three copies (an hour, then a night)
 
+Fill in `[[snapshot.copies]]` in `hosts/pi/homelab.toml` (there are two commented examples),
+then initialise all repositories at once - `snapshot init` from phase 5 already did this if
+the copies were configured then:
+
 ```bash
-# on the Pi, once per repository
+sudo homelab --conf hosts/pi/homelab.toml snapshot init
+```
+
+Manually, that is one `restic init` per repository:
+
+```bash
 restic init --repo /srv/cold/restic --password-file /etc/homelab/restic-cold.password
-restic init --repo sftp:u123456@u123456.your-storagebox.de:23//restic \
+restic init --repo sftp:u123456-sub1@u123456.your-storagebox.de:23//restic \
   --password-file /etc/homelab/restic-offsite.password
 ```
 
-The Storage Box speaks SFTP on **port 23**, not 22, and restic's URL carries it as `:23`.
+**Setting up the Storage Box**, before that `restic init` can work:
+
+1. Create a **sub-account** for this backup, not a second use of the main account. A
+   sub-account gets its own username (`u123456-sub1`), its own home directory, and its own
+   SSH keys, so a key stolen from the Pi can only reach the backup space.
+2. Add the Pi's public key (`/root/.ssh/id_ed25519_backup.pub`) to that sub-account and make
+   sure SFTP access is enabled for it.
+3. Point the URL at the sub-account's home: `sftp:<user>@<user>.your-storagebox.de:23//restic`
+   - **port 23** for SFTP, not 22, and the double slash means "absolute path". `restic init`
+   fails loudly and immediately if the path is wrong, so just try it.
+4. Optionally enable the Storage Box's own snapshots if your plan has them. That protects the
+   repository from a bad `prune`, which is the one mistake a backup tool cannot undo for you.
 
 `homelab snapshot copy` then runs, per target:
 

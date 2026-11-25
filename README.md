@@ -70,6 +70,7 @@ homelab config --non-interactive
 | `homelab status [--json]` | table of state, health, image and URL |
 | `homelab urls` | print each service's public URL from its `.env` |
 | `homelab logs SERVICE [-f] [-n N]` | tail one service |
+| `homelab snapshot init` | create each repository and its passphrase, idempotently |
 | `homelab snapshot run` | pre-hooks, snapshot, retention, verify, notify |
 | `homelab snapshot copy [--only NAME]` | replicate to each `[[snapshot.copies]]` target |
 | `homelab snapshot list / verify / stats` | inspect the repository |
