@@ -1,6 +1,14 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   adguard_home:
-    image: adguard/adguardhome:latest
+    image: ${ADGUARD_IMAGE:-adguard/adguardhome:latest}
+    logging: *default-logging
     container_name: adguard_home
     hostname: adguard_home
     restart: unless-stopped
@@ -8,8 +16,8 @@ services:
       - "53:53/tcp"
       - "53:53/udp"
     volumes:
-      - ./work:/opt/adguardhome/work
-      - ./conf:/opt/adguardhome/conf
+      - ${DATA_DIR:-.}/work:/opt/adguardhome/work
+      - ${DATA_DIR:-.}/conf:/opt/adguardhome/conf
     environment:
       - TZ=Europe/Berlin
     networks:
@@ -18,7 +26,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.adguard_home.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.adguard_home.entrypoints=websecure"
-      - "traefik.http.routers.adguard_home.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.adguard_home.middlewares=security-headers@docker"
+      - "traefik.http.routers.adguard_home.tls.certresolver=dns"
       - "traefik.http.routers.adguard_home.tls.domains[0].main=${DOMAIN}"
 
 networks:

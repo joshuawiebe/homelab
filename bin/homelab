@@ -1,0 +1,1821 @@
+#!/usr/bin/env python3
+"""homelab - run, inspect, verify and snapshot this homelab docker stack.
+
+Single-file CLI, standard library only, Python 3.11+.
+
+    homelab up            start every service in dependency order
+    homelab status        table of containers, health and public URLs
+    homelab doctor        preflight checks (ports, env vars, certs, disk)
+    homelab snapshot run  snapshot the stack with restic or borg
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+VERSION = "1.0.0"
+CONF_NAME = "homelab.toml"
+SERVICES_DIR = "services"
+COMPOSE_FILE = "docker-compose.yml"
+ENV_TEMPLATE = ".env.template"
+ENV_FILE = ".env"
+PLACEHOLDER_HINTS = ("(put", "(paste", "changeme", "changme")
+
+SECRET_HINTS = ("PASS", "TOK", "KEY", "SECRET", "PASSPHRASE")
+
+REMOTE_REPO_PREFIXES = ("sftp:", "s3:", "rest:", "b2:", "azure:", "gs:", "swift:", "rclone:")
+
+
+class HomelabError(RuntimeError):
+    """Fatal, user-facing error."""
+
+
+# --------------------------------------------------------------------------- io
+
+
+class Result:
+    __slots__ = ("code", "out", "err")
+
+    def __init__(self, code: int, out: str = "", err: str = "") -> None:
+        self.code = code
+        self.out = out
+        self.err = err
+
+    @property
+    def ok(self) -> bool:
+        return self.code == 0
+
+
+class Shell:
+    """Runs commands, or prints them when dry_run is set."""
+
+    def __init__(self, dry_run: bool = False, verbose: bool = False) -> None:
+        self.dry_run = dry_run
+        self.verbose = verbose
+
+    def probe(self, args) -> Result:
+        """Run a read-only check even in --dry-run mode."""
+        saved = self.dry_run
+        self.dry_run = False
+        try:
+            try:
+                return self.run(args, check=False)
+            except HomelabError as exc:
+                if str(exc).startswith("command not found"):
+                    return Result(1, "", str(exc))
+                raise
+        finally:
+            self.dry_run = saved
+
+    def run(self, args, check: bool = True, capture: bool = True, env=None, cwd=None) -> Result:
+        printable = shlex.join(args)
+        if self.dry_run:
+            print(f"  $ {printable}")
+            return Result(0)
+        if self.verbose:
+            print(f"  $ {printable}")
+        try:
+            proc = subprocess.run(
+                args,
+                capture_output=capture,
+                text=True,
+                env=env,
+                cwd=cwd,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise HomelabError(f"command not found: {args[0]}") from None
+        result = Result(
+            proc.returncode,
+            proc.stdout or "" if capture else "",
+            proc.stderr or "" if capture else "",
+        )
+        if check and not result.ok:
+            detail = (result.err or result.out).strip().splitlines()
+            hint = detail[-1] if detail else f"exit {result.code}"
+            raise HomelabError(f"`{printable}` failed: {hint}")
+        return result
+
+
+def read_env(path: Path) -> dict:
+    values = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text().split("\n"):
+        line = raw.strip()
+        if not line or line[0] == "#" or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def parse_template(path: Path) -> list:
+    """Return [{key, value, help}] preserving the comment block above each key."""
+    entries = []
+    comment: list = []
+    for raw in path.read_text().split("\n"):
+        line = raw.strip()
+        if line[:1] == "#":
+            comment.append(line.lstrip("#").strip())
+            continue
+        if not line or "=" not in line:
+            comment = []
+            continue
+        parts = line.split("=", 1)
+        entries.append(
+            {
+                "key": parts[0].strip(),
+                "value": parts[1].strip() if len(parts) > 1 else "",
+                "help": " ".join(c for c in comment if c),
+            }
+        )
+        comment = []
+    return entries
+
+
+def write_env(path: Path, values: dict) -> None:
+    lines: list = []
+    seen = set()
+    if path.is_file():
+        for raw in path.read_text().split("\n"):
+            stripped = raw.strip()
+            if "=" in stripped and stripped[:1] != "#":
+                key = stripped.split("=", 1)[0].strip()
+                if key in values:
+                    lines.append(f"{key}={values[key]}")
+                    seen.add(key)
+                    continue
+            lines.append(raw)
+    for key, value in values.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    path.chmod(0o600)
+
+
+def is_placeholder(value: str) -> bool:
+    low = value.lower()
+    return any(hint in low for hint in PLACEHOLDER_HINTS)
+
+
+def htpasswd_entry(user: str, password: str) -> str:
+    """Return a `user:hash` line that traefik's basicauth accepts."""
+    if shutil.which("htpasswd"):
+        result = subprocess.run(
+            ["htpasswd", "-nbB", user, password], capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    if shutil.which("openssl"):
+        result = subprocess.run(
+            ["openssl", "passwd", "-apr1", password], capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return f"{user}:{result.stdout.strip()}"
+    raise HomelabError(
+        "need htpasswd (apache2-utils) or openssl to hash the dashboard password"
+    )
+
+
+# ------------------------------------------------------------------- discovery
+
+
+def looks_like_root(path: Path) -> bool:
+    return (path / SERVICES_DIR).is_dir() and (path / "bin" / "homelab").is_file()
+
+
+def find_root(explicit: str | None = None) -> Path:
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    env_root = os.environ.get("HOMELAB_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    here = Path.cwd()
+    candidates.extend([here, *here.parents])
+    script = Path(__file__).resolve()
+    candidates.extend([script.parent, *script.parents])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if looks_like_root(resolved):
+            return resolved
+    raise HomelabError(
+        "could not find the homelab checkout (no services/ + bin/homelab found); "
+        "pass --root or set HOMELAB_ROOT"
+    )
+
+
+def service_dirs(root: Path, subdir: str = SERVICES_DIR) -> dict:
+    base = root / subdir
+    if not base.is_dir():
+        raise HomelabError(f"missing {base}")
+    found = {}
+    for name in sorted(os.listdir(base)):
+        path = base / name
+        if (path / COMPOSE_FILE).is_file():
+            found[name] = path
+    if not found:
+        raise HomelabError(f"no {COMPOSE_FILE} found under {base}")
+    return found
+
+
+def compose_text(path: Path) -> str:
+    return (path / COMPOSE_FILE).read_text()
+
+
+def service_profiles(path: Path) -> list:
+    """Compose profiles declared by a service, if any (no YAML parser here)."""
+    found = []
+    lines = compose_text(path).splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("profiles:"):
+            continue
+        inline = stripped[len("profiles:"):].strip()
+        if inline:
+            found.extend(re.findall(r"[\w][\w.-]*", inline))
+            continue
+        for follow in lines[index + 1:]:
+            if not follow.strip().startswith("-"):
+                break
+            found.extend(re.findall(r"[\w][\w.-]*", follow))
+    return found
+
+
+def interpolate(text: str, env: dict) -> str:
+    """Resolve ${VAR} and ${VAR:-default} the way compose would, without compose."""
+
+    def repl(match):
+        return env.get(match.group(1), "") or (match.group(2) or "")
+
+    return re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", repl, text)
+
+
+def block_lines(text: str, key: str) -> list:
+    """Lines nested under every `key:` mapping, selected by indentation.
+
+    Enough YAML for this repo's short-form volume lists; long-form `type: bind` entries are
+    not handled on purpose, because guessing there is worse than saying so.
+    """
+    lines = text.splitlines()
+    out = []
+    for index, line in enumerate(lines):
+        if line.strip() != f"{key}:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for follow in lines[index + 1:]:
+            if not follow.strip():
+                continue
+            if len(follow) - len(follow.lstrip()) <= indent:
+                break
+            out.append(follow)
+    return out
+
+
+def bind_sources(svc_dir: Path, env: dict) -> list:
+    """Host paths a service bind-mounts, minus sockets and host config files."""
+    found = {}
+    for line in block_lines(compose_text(svc_dir), "volumes"):
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        spec = interpolate(stripped[2:].strip().strip('"').strip("'"), env)
+        host, sep, container = spec.partition(":")
+        if not sep or not host.startswith(("/", ".")):
+            continue
+        if host == "/var/run/docker.sock" or host.startswith(("/etc/", "/dev/")):
+            continue
+        path = Path(host)
+        if not path.is_absolute():
+            path = (svc_dir / path).resolve()
+        found[str(path)] = container.split(":")[0]
+    return [(Path(host), container) for host, container in sorted(found.items())]
+
+
+def named_volumes(svc_dir: Path, env: dict) -> list:
+    """Volume names a service uses instead of a host path (state inside docker's root)."""
+    found = set()
+    for line in block_lines(compose_text(svc_dir), "volumes"):
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        spec = interpolate(stripped[2:].strip().strip('"').strip("'"), env)
+        host, sep, _ = spec.partition(":")
+        if not sep or not host or host.isdigit():
+            continue
+        if host.startswith(("/", ".", "$")):
+            continue
+        found.add(host)
+    return sorted(found)
+
+
+def publishes_443(path: Path) -> bool:
+    text = compose_text(path)
+    return bool(re.search(r'"443:443"', text)) or bool(re.search(r"'443:443'", text))
+
+
+def detect_proxy(dirs: dict) -> str | None:
+    for name, path in dirs.items():
+        if publishes_443(path):
+            return name
+    return None
+
+
+def load_conf(root: Path, explicit: str | None = None) -> dict:
+    if explicit:
+        path = Path(explicit).expanduser()
+    else:
+        path = Path(os.environ.get("HOMELAB_CONF") or root / CONF_NAME).expanduser()
+    if not path.is_file():
+        return {}
+    import tomllib
+
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def build_order(dirs: dict, proxy: str | None, conf: dict) -> list:
+    ordered = []
+    if proxy and proxy in dirs:
+        ordered.append(proxy)
+    configured = conf.get("general", {}).get("order") or []
+    for name in configured:
+        if name in dirs and name not in ordered:
+            ordered.append(name)
+    for name in sorted(dirs):
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def compose_cmd(svc_dir: Path, *args) -> list:
+    return [
+        "docker",
+        "compose",
+        "--file",
+        str(svc_dir / COMPOSE_FILE),
+        *args,
+    ]
+
+
+# ------------------------------------------------------------------------- app
+
+
+class App:
+    def __init__(self, args) -> None:
+        self.args = args
+        self.root = find_root(getattr(args, "root", None))
+        self.conf = load_conf(self.root, getattr(args, "conf", None))
+        self.host = getattr(args, "host", None)
+        host_conf = self._host_conf(self.host)
+        general = self.conf.get("general", {})
+        subdir = host_conf.get("services_dir") or general.get("services_dir") or SERVICES_DIR
+        self.services_dir = subdir
+        self.dirs = service_dirs(self.root, subdir)
+        wanted = host_conf.get("services")
+        if wanted:
+            missing = [name for name in wanted if name not in self.dirs]
+            if missing:
+                raise HomelabError(
+                    f"host {self.host} lists unknown service(s): {', '.join(missing)}"
+                )
+            self.dirs = {name: self.dirs[name] for name in wanted}
+        self.sh = Shell(dry_run=getattr(args, "dry_run", False), verbose=getattr(args, "verbose", False))
+
+    def _host_conf(self, host: str | None) -> dict:
+        hosts = self.conf.get("hosts", {})
+        if not host:
+            return {}
+        if host not in hosts:
+            known = ", ".join(sorted(hosts)) or "none configured"
+            raise HomelabError(f"unknown host: {host} (configured: {known})")
+        return hosts[host] or {}
+
+    # -- helpers ----------------------------------------------------------
+    @property
+    def proxy(self) -> str | None:
+        configured = getattr(self.args, "proxy", None) or self.conf.get("general", {}).get("proxy")
+        if configured and configured in self.dirs:
+            return configured
+        return detect_proxy(self.dirs)
+
+    def order(self) -> list:
+        return build_order(self.dirs, self.proxy, self.conf)
+
+    def env_for(self, name: str) -> dict:
+        return read_env(self.dirs[name] / ENV_FILE)
+
+    def selected(self, requested) -> list:
+        order = self.order()
+        if not requested:
+            return order
+        unknown = [name for name in requested if name not in self.dirs]
+        if unknown:
+            raise HomelabError(
+                f"unknown service(s): {', '.join(unknown)}; known: {', '.join(order)}"
+            )
+        return [name for name in order if name in requested]
+
+    def require_docker(self) -> None:
+        if self.sh.dry_run:
+            return
+        if not shutil.which("docker"):
+            raise HomelabError("docker is not installed")
+        if not self.sh.run(["docker", "info"], check=False).ok:
+            raise HomelabError("cannot reach the docker daemon (is it running?)")
+
+    def ensure_network(self, network: str = "proxy") -> None:
+        if self.sh.dry_run:
+            return
+        exists = self.sh.run(
+            ["docker", "network", "inspect", network], check=False
+        ).ok
+        if not exists:
+            self.sh.run(["docker", "network", "create", network])
+
+    # -- commands ---------------------------------------------------------
+    def cmd_up(self) -> int:
+        explicit = bool(self.args.services)
+        targets = self.selected(self.args.services)
+        targets = self._drop_inactive_profiles(targets)
+        if not explicit:
+            targets = self._drop_extra_proxies(targets)
+        self._guard_proxy_conflict(targets)
+        self.require_docker()
+        self.ensure_network()
+        print(f"starting {len(targets)} service(s)\n")
+        failures = []
+        for name in targets:
+            print(f"  {name} ...", end=" ", flush=True)
+            try:
+                extra = []
+                for profile in getattr(self.args, "profile", None) or []:
+                    extra += ["--profile", profile]
+                self.sh.run(compose_cmd(self.dirs[name], *extra, "up", "-d"))
+            except HomelabError as exc:
+                print("FAILED")
+                failures.append(f"{name}: {exc}")
+                continue
+            print("started")
+        if not self.args.no_wait and not self.sh.dry_run:
+            self._wait_all(targets)
+        print()
+        if not self.sh.dry_run:
+            self.cmd_status()
+        if failures:
+            print("\nfailures:")
+            for line in failures:
+                print(f"  - {line}")
+            return 1
+        return 0
+
+    def _drop_inactive_profiles(self, targets) -> list:
+        """Services behind a compose profile only start when that profile is asked for."""
+        active = set(getattr(self.args, "profile", None) or [])
+        kept, skipped = [], []
+        for name in targets:
+            declared = set(service_profiles(self.dirs[name]))
+            if declared and not declared & active:
+                skipped.append(name)
+                continue
+            kept.append(name)
+        if skipped:
+            print(
+                f"skipping {', '.join(skipped)}: behind a compose profile "
+                f"(use `--profile {service_profiles(self.dirs[skipped[0]])[0]}`)\n"
+            )
+        return kept
+
+    def _drop_extra_proxies(self, targets) -> list:
+        """Only one reverse proxy may own 80/443; keep the configured one."""
+        extra = [
+            name for name in targets
+            if name != self.proxy and publishes_443(self.dirs[name])
+        ]
+        if extra:
+            print(
+                f"skipping {', '.join(extra)}: only {self.proxy} may publish 80/443 "
+                f"(use `--proxy {extra[0]}` to switch)\n"
+            )
+        return [name for name in targets if name not in extra]
+
+    def _guard_proxy_conflict(self, targets) -> None:
+        with_443 = [name for name in targets if publishes_443(self.dirs[name])]
+        if len(with_443) > 1 and not getattr(self.args, "allow_port_conflict", False):
+            raise HomelabError(
+                f"{', '.join(with_443)} all publish 80/443 and cannot run together; "
+                "pick one with --proxy or pass --allow-port-conflict"
+            )
+
+    def _wait_all(self, targets) -> None:
+        deadline = time.monotonic() + self.args.wait
+        pending = list(targets)
+        while pending and time.monotonic() < deadline:
+            still = []
+            for name in pending:
+                state = self._container_state(name)
+                if state in ("healthy", "running", "exited"):
+                    continue
+                still.append(name)
+            pending = still
+            if pending:
+                time.sleep(2)
+        if pending:
+            print(f"\n  still starting after {self.args.wait}s: {', '.join(pending)}")
+
+    def _container_state(self, name: str) -> str:
+        fmt = "{{.State.Status}}{{if .State.Health}}:{{.State.Health.Status}}{{end}}"
+        result = self.sh.run(
+            ["docker", "inspect", "--format", fmt, name], check=False
+        )
+        if not result.ok:
+            return "missing"
+        raw = result.out.strip()
+        if raw.startswith("running:"):
+            return raw.split(":", 1)[1]
+        return raw
+
+    def cmd_down(self) -> int:
+        self.require_docker()
+        targets = list(reversed(self.selected(self.args.services)))
+        print(f"stopping {len(targets)} service(s)\n")
+        for name in targets:
+            print(f"  {name} ...", end=" ", flush=True)
+            try:
+                self.sh.run(compose_cmd(self.dirs[name], "down"))
+                print("stopped")
+            except HomelabError:
+                print("skipped (not running)")
+        return 0
+
+    def cmd_restart(self) -> int:
+        code = self.cmd_down()
+        if code:
+            return code
+        return self.cmd_up()
+
+    def cmd_status(self) -> int:
+        self.require_docker()
+        if self.args.json:
+            return self._status_json()
+        rows = self._collect_status()
+        if not rows:
+            print("no containers running")
+            return 0
+        header = ("SERVICE", "STATE", "HEALTH", "IMAGE", "URL")
+        widths = [len(h) for h in header]
+        for row in rows:
+            for index, cell in enumerate(row):
+                widths[index] = max(widths[index], len(cell))
+        print("  ".join(h.ljust(widths[i]) for i, h in enumerate(header)))
+        print("  ".join("-" * widths[i] for i in range(len(header))))
+        for row in rows:
+            print("  ".join(row[i].ljust(widths[i]) for i in range(len(row))))
+        return 0
+
+    def _status_json(self) -> int:
+        print(json.dumps(self._collect_status(), indent=2))
+        return 0
+
+    def _collect_status(self) -> list:
+        rows = []
+        for name in self.order():
+            state = self._container_state(name)
+            if state == "missing":
+                continue
+            raw = self.sh.run(
+                ["docker", "inspect", "--format",
+                 "{{.State.Status}}|{{.Config.Image}}", name], check=False
+            )
+            status, _, image = raw.out.strip().partition("|")
+            health = state.split(":", 1)[1] if ":" in state else "-"
+            rows.append([name, status or state, health, image or "-", self._url_for(name)])
+        return rows
+
+    def _url_for(self, name: str) -> str:
+        env = self.env_for(name)
+        domain = env.get("DOMAIN") or ""
+        if not domain or is_placeholder(domain):
+            return "-"
+        return f"https://{domain}"
+
+    def cmd_urls(self) -> int:
+        for name in self.order():
+            url = self._url_for(name)
+            if url != "-":
+                print(f"{name:20} {url}")
+        return 0
+
+    def cmd_logs(self) -> int:
+        if self.args.service not in self.dirs:
+            raise HomelabError(f"unknown service: {self.args.service}")
+        self.require_docker()
+        args = ["logs", "--tail", str(self.args.tail)]
+        if self.args.follow:
+            args.append("--follow")
+        self.sh.run(compose_cmd(self.dirs[self.args.service], *args), check=False, capture=False)
+        return 0
+
+    # -- config -----------------------------------------------------------
+    def cmd_config(self) -> int:
+        base_domain = None
+        for name in self.order():
+            svc_dir = self.dirs[name]
+            template = svc_dir / ENV_TEMPLATE
+            if not template.is_file():
+                continue
+            env_path = svc_dir / ENV_FILE
+            current = read_env(env_path)
+            updates = {}
+            print(f"\n[{name}]")
+            for entry in parse_template(template):
+                key = entry["key"]
+                existing = current.get(key, "")
+                usable = existing and not is_placeholder(existing)
+                if usable and not self.args.reconfigure:
+                    updates[key] = existing
+                    continue
+                if self.args.non_interactive:
+                    if usable:
+                        updates[key] = existing
+                    elif any(hint in key.upper() for hint in SECRET_HINTS):
+                        updates[key] = secrets.token_urlsafe(24)
+                    elif is_placeholder(entry["value"]):
+                        updates[key] = ""
+                    else:
+                        updates[key] = entry["value"]
+                    continue
+                updates[key] = self._ask(name, key, entry, existing)
+            if updates:
+                write_env(env_path, updates)
+                print(f"  wrote {env_path.relative_to(self.root)} (mode 600)")
+        self._ensure_basicauth()
+        print("\nconfiguration written; run `homelab doctor` next")
+        return 0
+
+    def _ensure_basicauth(self) -> None:
+        proxy = self.proxy
+        if not proxy:
+            return
+        users_file = self.dirs[proxy] / "users"
+        if users_file.is_file() and not self.args.reconfigure:
+            return
+        user, password = "admin", ""
+        if self.args.non_interactive:
+            password = secrets.token_urlsafe(18)
+        else:
+            print(f"\n[{proxy} dashboard login]")
+            answer = input("  username [admin]: ").strip()
+            user = answer or "admin"
+            while not password:
+                first = getpass.getpass("  password: ")
+                if not first:
+                    continue
+                if first != getpass.getpass("  confirm: "):
+                    print("  passwords differ, try again")
+                    continue
+                password = first
+        users_file.write_text(htpasswd_entry(user, password) + "\n")
+        users_file.chmod(0o600)
+        print(f"  wrote {users_file.relative_to(self.root)} (mode 600)")
+        if self.args.non_interactive:
+            print(f"  dashboard login: {user} / {password}")
+
+    def _ask(self, service: str, key: str, entry: dict, existing: str) -> str:
+        if entry.get("help"):
+            print(f"  # {entry['help']}")
+        secret = any(hint in key.upper() for hint in SECRET_HINTS)
+        default = ""
+        if secret:
+            default = existing if existing and not is_placeholder(existing) else secrets.token_urlsafe(24)
+        elif existing and not is_placeholder(existing):
+            default = existing
+        prompt = f"  {key}"
+        if default and not secret:
+            prompt += f" [{default}]"
+        if secret:
+            prompt += " [generated]"
+        answer = input(prompt + ": ").strip()
+        if not answer:
+            return default or entry.get("value", "")
+        return answer
+
+    # -- doctor -----------------------------------------------------------
+    def cmd_doctor(self) -> int:
+        checks = []
+        add = checks.append
+        add(self._check_python())
+        add(self._check_conf())
+        add(self._check_docker())
+        add(self._check_network())
+        for name in self.order():
+            add(self._check_service(name))
+        add(self._check_resolvers())
+        add(self._check_basicauth())
+        add(self._check_ports())
+        add(self._check_floating_tags())
+        add(self._check_socket_mounts())
+        add(self._check_data_in_tree())
+        add(self._check_named_volumes())
+        add(self._check_log_limits())
+        add(self._check_disk())
+        checks.extend(self._check_snapshots())
+
+        if self.args.json:
+            print(json.dumps(checks, indent=2))
+            failures = [c for c in checks if c["status"] == "FAIL"]
+            warnings = [c for c in checks if c["status"] == "WARN"]
+            if failures or (self.args.strict and warnings):
+                return 1
+            return 0
+        for check in checks:
+            print(f"[{check['status']:4}] {check['name']}")
+            if check["detail"]:
+                print(f"       {check['detail']}")
+            if check["hint"]:
+                print(f"       hint: {check['hint']}")
+        failures = [c for c in checks if c["status"] == "FAIL"]
+        warnings = [c for c in checks if c["status"] == "WARN"]
+        print(
+            f"\n{len(checks) - len(failures) - len(warnings)} ok, "
+            f"{len(warnings)} warn, {len(failures)} fail"
+        )
+        if failures or (self.args.strict and warnings):
+            return 1
+        return 0
+
+    @staticmethod
+    def _check(name: str, status: str, detail: str = "", hint: str = "") -> dict:
+        return {"name": name, "status": status, "detail": detail, "hint": hint}
+
+    def _check_python(self) -> dict:
+        if sys.version_info >= (3, 11):
+            return self._check("python >= 3.11", "OK", sys.version.split()[0])
+        return self._check("python >= 3.11", "FAIL", sys.version.split()[0], "upgrade python")
+
+    def _check_conf(self) -> dict:
+        path = self.root / CONF_NAME
+        if path.is_file():
+            return self._check("homelab.toml", "OK", str(path))
+        return self._check(
+            "homelab.toml", "WARN", "not found, using defaults",
+            f"cp {CONF_NAME}.example {CONF_NAME}",
+        )
+
+    def _check_docker(self) -> dict:
+        if not shutil.which("docker"):
+            return self._check("docker", "FAIL", "docker binary missing", "install docker")
+        if self.sh.run(["docker", "info"], check=False).ok:
+            version = self.sh.run(["docker", "compose", "version", "--short"], check=False)
+            return self._check("docker", "OK", f"compose {version.out.strip() or 'unknown'}")
+        return self._check(
+            "docker", "FAIL", "daemon unreachable",
+            "systemctl enable --now docker",
+        )
+
+    def _check_network(self) -> dict:
+        if self.sh.run(["docker", "network", "inspect", "proxy"], check=False).ok:
+            return self._check("proxy network", "OK", "exists")
+        return self._check("proxy network", "WARN", "missing", "homelab up creates it")
+
+    def _check_service(self, name: str) -> dict:
+        svc_dir = self.dirs[name]
+        env_path = svc_dir / ENV_FILE
+        template = svc_dir / ENV_TEMPLATE
+        # variables without a default are the ones an .env file must supply
+        referenced = {
+            match.group(1)
+            for match in re.finditer(r"\$\{(\w+)(?::-([^}]*))?\}", compose_text(svc_dir))
+            if match.group(2) is None
+        }
+        if not env_path.is_file():
+            if not template.is_file() and not referenced:
+                return self._check(f"{name} env", "OK", "no secrets needed")
+            return self._check(
+                f"{name} env", "FAIL", f"{env_path.relative_to(self.root)} missing",
+                "homelab config --non-interactive (or run `homelab config`)",
+            )
+        mode = env_path.stat().st_mode & 0o777
+        if mode & 0o077:
+            return self._check(
+                f"{name} env", "WARN", f"mode {oct(mode)} is group/world readable",
+                f"chmod 600 {env_path.relative_to(self.root)}",
+            )
+        env = read_env(env_path)
+        placeholders = [k for k, v in env.items() if is_placeholder(v)]
+        if placeholders:
+            return self._check(
+                f"{name} env", "FAIL", f"placeholder values: {', '.join(placeholders)}",
+                "homelab config --reconfigure",
+            )
+        empty = sorted(k for k, v in env.items() if not v.strip())
+        if empty:
+            return self._check(
+                f"{name} env", "WARN", f"empty values: {', '.join(empty)}",
+                "fill them in, empty is rarely correct",
+            )
+        if template.is_file():
+            missing = [e["key"] for e in parse_template(template) if e["key"] not in env]
+            if missing:
+                return self._check(
+                    f"{name} env", "FAIL", f"missing keys: {', '.join(missing)}",
+                    "homelab config --reconfigure",
+                )
+        unset = sorted(key for key in referenced if key not in env)
+        if unset:
+            return self._check(
+                f"{name} env", "FAIL",
+                f"compose references unset variables: {', '.join(unset)}",
+                "add them to the service .env",
+            )
+        return self._check(f"{name} env", "OK", f"mode {oct(mode)}")
+
+    def _check_resolvers(self) -> dict:
+        proxy = self.proxy
+        if not proxy:
+            return self._check("tls resolver", "SKIP", "this host runs no reverse proxy")
+        text = compose_text(self.dirs[proxy])
+        defined = set(re.findall(r"resolvers\.(\w+)\.acme", text))
+        used = set()
+        for name, path in self.dirs.items():
+            used.update(re.findall(r"certresolver=(\w+)", compose_text(path)))
+        if not defined:
+            return self._check(
+                "tls resolver", "FAIL", f"{proxy} defines no ACME resolver",
+                "add --certificatesresolvers.dns.acme... flags",
+            )
+        broken = sorted(used - defined)
+        if broken:
+            return self._check(
+                "tls resolver", "FAIL",
+                f"services request undefined resolver(s): {', '.join(broken)}; "
+                f"{proxy} defines: {', '.join(sorted(defined))}",
+                "rename the label to a defined resolver",
+            )
+        return self._check(
+            "tls resolver", "OK", f"{proxy} defines {', '.join(sorted(defined))}"
+        )
+
+    def _check_ports(self) -> dict:
+        wanted = {80: "tcp", 443: "tcp", 53: "udp"}
+        if not shutil.which("ss"):
+            return self._check("host ports", "SKIP", "ss not available")
+        busy = []
+        for port, proto in wanted.items():
+            flag = "-ltn" if proto == "tcp" else "-lun"
+            out = self.sh.run(["ss", flag], check=False).out
+            for line in out.split("\n")[1:]:
+                fields = line.split()
+                if len(fields) > 4 and fields[4].endswith(f":{port}"):
+                    busy.append(f"{port}/{proto}")
+                    break
+        if busy:
+            return self._check(
+                "host ports", "WARN", f"already bound: {', '.join(busy)}",
+                "stop the conflicting process (systemd-resolved holds 53)",
+            )
+        return self._check("host ports", "OK", "80, 443, 53 free")
+
+    def _check_basicauth(self) -> dict:
+        proxy = self.proxy
+        if not proxy:
+            return self._check("dashboard auth", "SKIP", "no proxy detected")
+        users_file = self.dirs[proxy] / "users"
+        if not users_file.is_file():
+            return self._check(
+                "dashboard auth", "FAIL", f"{users_file.relative_to(self.root)} missing",
+                "homelab config (writes the htpasswd entry)",
+            )
+        mode = users_file.stat().st_mode & 0o777
+        if mode & 0o077:
+            return self._check(
+                "dashboard auth", "WARN", f"mode {oct(mode)} is group/world readable",
+                f"chmod 600 {users_file.relative_to(self.root)}",
+            )
+        return self._check("dashboard auth", "OK", "htpasswd file mode 600")
+
+    def _check_floating_tags(self) -> dict:
+        floating = []
+        for name, path in self.dirs.items():
+            for match in re.findall(r"(?m)^\s*image:\s*(\S+)", compose_text(path)):
+                image = match
+                if ":-" in image:
+                    image = image.split(":-", 1)[1].rstrip("}")
+                tag = image.rsplit("/", 1)[-1]
+                if ":" not in tag:
+                    floating.append(f"{name}={image} (untagged)")
+                elif tag.endswith(":latest"):
+                    floating.append(f"{name}={image}")
+        if floating:
+            return self._check(
+                "image pinning", "WARN", ", ".join(sorted(set(floating))),
+                "set <SERVICE>_IMAGE in the service .env to pin a version",
+            )
+        return self._check("image pinning", "OK", "all images pinned")
+
+    def _check_socket_mounts(self) -> dict:
+        rw = []
+        for name, path in self.dirs.items():
+            text = compose_text(path)
+            if "/var/run/docker.sock" in text and ":ro" not in text:
+                rw.append(name)
+        if rw:
+            return self._check(
+                "docker.sock", "WARN", f"mounted read-write in: {', '.join(rw)}",
+                "read-write socket access is root-equivalent",
+            )
+        return self._check("docker.sock", "OK", "no read-write socket mounts")
+
+    def _check_data_in_tree(self) -> dict:
+        data_dir = self.conf.get("general", {}).get("data_dir")
+        inside = []
+        for name, path in self.dirs.items():
+            for child in ("data", "db", "nextcloud", "vw-data", "conf", "work", "letsencrypt", "config"):
+                candidate = path / child
+                if candidate.is_dir():
+                    inside.append(str(candidate.relative_to(self.root)))
+        if data_dir and inside:
+            return self._check(
+                "data location", "WARN",
+                f"state inside the git tree ({len(inside)} dirs) while data_dir={data_dir}",
+                "move state to data_dir and bind-mount it",
+            )
+        if inside:
+            return self._check(
+                "data location", "WARN", f"state inside the git tree: {', '.join(inside[:4])}",
+                "a `git clean -xfd` deletes this; move it to /srv/homelab",
+            )
+        return self._check("data location", "OK", "no state in the git tree")
+
+    def _snapshot_age_hours(self, repo: str, password_file) -> float | None:
+        """Age of the newest snapshot in hours, or None if it cannot be probed."""
+        if repo.startswith(REMOTE_REPO_PREFIXES) or not Path(repo).is_dir():
+            return None
+        if not shutil.which("restic"):
+            return None
+        args = ["restic", "--repo", repo]
+        if password_file:
+            args += ["--password-file", password_file]
+        args += ["snapshots", "--json", "--latest", "1"]
+        result = self.sh.run(args, check=False)
+        if not result.ok or not result.out.strip():
+            return None
+        try:
+            entries = json.loads(result.out)
+        except ValueError:
+            return None
+        if not entries:
+            return None
+        stamp = str(entries[0].get("time", ""))[:19]
+        try:
+            epoch = time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            return None
+        return (time.time() - epoch) / 3600
+
+    def _check_snapshots(self) -> list:
+        conf = self.snapshot_conf()
+        repo = conf.get("repo")
+        if not repo:
+            return [self._check("snapshots", "SKIP", "snapshot.repo not configured")]
+        checks = []
+        if repo.startswith(REMOTE_REPO_PREFIXES):
+            checks.append(self._check("snapshots", "OK", f"{repo} (remote, not probed)"))
+        elif not Path(repo).is_dir():
+            checks.append(
+                self._check(
+                    "snapshots", "FAIL", f"{repo} is missing or not mounted",
+                    "mount the mirror, or run `homelab provision pi`",
+                )
+            )
+        else:
+            age = self._snapshot_age_hours(repo, conf.get("password_file"))
+            if age is None:
+                checks.append(
+                    self._check(
+                        "snapshots", "WARN", f"{repo}: snapshots unreadable",
+                        "check the passphrase file, then `homelab snapshot list`",
+                    )
+                )
+            elif age > 36:
+                checks.append(
+                    self._check(
+                        "snapshots", "FAIL",
+                        f"{repo}: newest snapshot is {age / 24:.1f} days old",
+                        "the timer is not running: `systemctl list-timers 'homelab-*'`",
+                    )
+                )
+            else:
+                checks.append(self._check("snapshots", "OK", f"{repo}: newest {age:.1f}h old"))
+        for copy in conf.get("copies") or []:
+            name = copy.get("name", "?")
+            target = str(copy.get("repo", ""))
+            if target.startswith(REMOTE_REPO_PREFIXES):
+                checks.append(self._check(f"copy {name}", "OK", f"{target} (remote, not probed)"))
+                continue
+            if not Path(target).is_dir():
+                checks.append(
+                    self._check(
+                        f"copy {name}", "FAIL", f"{target} is missing",
+                        "run `homelab snapshot copy`",
+                    )
+                )
+                continue
+            age = self._snapshot_age_hours(target, copy.get("password_file"))
+            if age is None:
+                checks.append(self._check(f"copy {name}", "WARN", f"{target}: unreadable"))
+            elif age > 7 * 24:
+                checks.append(
+                    self._check(
+                        f"copy {name}", "WARN", f"newest copy is {age / 24:.1f} days old",
+                        "run `homelab snapshot copy`",
+                    )
+                )
+            else:
+                checks.append(
+                    self._check(f"copy {name}", "OK", f"newest {age / 24:.1f} days old")
+                )
+        return checks
+
+    def _check_named_volumes(self) -> dict:
+        offenders = []
+        for name in self.order():
+            env = read_env(self.dirs[name] / ENV_FILE)
+            named = named_volumes(self.dirs[name], env)
+            if named:
+                offenders.append(f"{name} ({', '.join(named)})")
+        if offenders:
+            return self._check(
+                "named volumes", "WARN", "; ".join(offenders),
+                "named volumes live in docker's data-root, which is the microSD on a Pi; "
+                "bind-mount a path under data_dir instead",
+            )
+        return self._check("named volumes", "OK", "all state is bind-mounted")
+
+    def _check_log_limits(self) -> dict:
+        unbounded = [
+            name for name in self.order() if "max-size" not in compose_text(self.dirs[name])
+        ]
+        if unbounded:
+            return self._check(
+                "log limits", "WARN", f"unbounded json-file logs: {', '.join(unbounded)}",
+                'add logging: {driver: json-file, options: {max-size: "10m", '
+                'max-file: "2"}} - unbounded logs fill the disk and wear an SD card',
+            )
+        return self._check("log limits", "OK", "every service caps its logs")
+
+    def _check_disk(self) -> dict:
+        targets = []
+        data_dir = self.conf.get("general", {}).get("data_dir")
+        if data_dir:
+            targets.append(Path(data_dir))
+        repo = self.conf.get("snapshot", {}).get("repo")
+        if repo:
+            targets.append(Path(repo))
+        if not targets:
+            return self._check("disk space", "SKIP", "no data_dir/snapshot.repo configured")
+        problems = []
+        details = []
+        for target in targets:
+            probe = target
+            while not probe.exists() and probe != probe.parent:
+                probe = probe.parent
+            usage = shutil.disk_usage(probe)
+            percent = usage.free / usage.total * 100
+            details.append(f"{probe} {percent:.0f}% free")
+            if percent < 10:
+                problems.append(str(probe))
+        status = "WARN" if problems else "OK"
+        return self._check("disk space", status, ", ".join(details), "free space on " + ", ".join(problems) if problems else "")
+
+    # -- snapshots --------------------------------------------------------
+    def snapshot_conf(self) -> dict:
+        conf = dict(self.conf.get("snapshot", {}))
+        conf.setdefault("tool", "restic")
+        conf.setdefault("keep_daily", 7)
+        conf.setdefault("keep_weekly", 4)
+        conf.setdefault("keep_monthly", 6)
+        conf.setdefault("check_subset", "5%")
+        return conf
+
+    def backend(self):
+        conf = self.snapshot_conf()
+        repo = conf.get("repo")
+        if not repo:
+            raise HomelabError("snapshot.repo is not set in homelab.toml")
+        if conf["tool"] == "borg":
+            return BorgCli(self.sh, conf)
+        return ResticCli(self.sh, conf)
+
+    def cmd_snapshot(self) -> int:
+        action = self.args.action
+        conf = self.snapshot_conf()
+        if action == "install":
+            return self._snapshot_install(conf)
+        if action == "uninstall":
+            return self._snapshot_uninstall(conf)
+        backend = self.backend()
+        if action == "run":
+            return self._snapshot_run(backend, conf)
+        if action == "list":
+            backend.snapshots()
+            return 0
+        if action == "verify":
+            backend.check(conf.get("check_subset", "5%"), full=self.args.full)
+            return 0
+        if action == "extract":
+            if not self.args.snapshot:
+                raise HomelabError("usage: homelab snapshot extract SNAPSHOT TARGET [--include PATH]")
+            backend.extract(self.args.snapshot, self.args.target, self.args.include)
+            return 0
+        if action == "stats":
+            backend.stats()
+            return 0
+        if action == "copy":
+            return self._snapshot_copy(backend, conf)
+        raise HomelabError(f"unknown snapshot action: {action}")
+
+    def _snapshot_copy(self, backend, conf) -> int:
+        copies = conf.get("copies") or []
+        if not copies:
+            raise HomelabError("no [[snapshot.copies]] targets configured in homelab.toml")
+        wanted = getattr(self.args, "only", None) or [c.get("name") for c in copies]
+        chosen = []
+        for name in wanted:
+            match = next((c for c in copies if c.get("name") == name), None)
+            if not match:
+                known = ", ".join(str(c.get("name")) for c in copies)
+                raise HomelabError(f"unknown copy target: {name} (configured: {known})")
+            chosen.append(match)
+        for target in chosen:
+            name = target.get("name")
+            print(f"copy -> {name} ({target['repo']})")
+            backend.copy_to(
+                target["repo"],
+                target.get("password_file"),
+                target.get("limit_upload"),
+            )
+            if target.get("prune", True):
+                backend.forget_at(
+                    target["repo"],
+                    target.get("password_file"),
+                    target.get("keep_daily", 14),
+                    target.get("keep_weekly", 8),
+                    target.get("keep_monthly", 12),
+                )
+            print(f"copy -> {name} done")
+        return 0
+
+    def _snapshot_run(self, backend, conf) -> int:
+        remote = getattr(self.args, "remote", None)
+        started = time.time()
+        try:
+            for hook in conf.get("pre", []):
+                command = ["ssh", remote, hook] if remote else ["bash", "-lc", hook]
+                print(f"  hook: {hook}")
+                self.sh.run(command)
+            backend.create(conf.get("source") or "/", conf.get("exclude", []))
+            backend.forget(
+                conf.get("keep_daily", 7),
+                conf.get("keep_weekly", 4),
+                conf.get("keep_monthly", 6),
+            )
+            if not self.args.no_check:
+                backend.check(conf.get("check_subset", "5%"))
+            if conf.get("copy"):
+                self._snapshot_copy(backend, conf)
+        except HomelabError as exc:
+            self.notify(conf, ok=False, message=str(exc))
+            raise
+        elapsed = int(time.time() - started)
+        self.notify(conf, ok=True, message=f"snapshot finished in {elapsed}s")
+        print(f"snapshot complete in {elapsed}s")
+        return 0
+
+    def notify(self, conf: dict, ok: bool, message: str) -> None:
+        if self.sh.dry_run:
+            return
+        url = conf.get("healthcheck_url")
+        if url:
+            target = url if ok else url.rstrip("/") + "/fail"
+            self._http(target, "snapshot ping")
+        gotify_url = conf.get("gotify_url")
+        token = conf.get("gotify_token")
+        if gotify_url and token:
+            body = json.dumps(
+                {"title": "homelab snapshot " + ("ok" if ok else "FAILED"), "message": message}
+            ).encode()
+            self._http(
+                gotify_url.rstrip("/") + "/message?token=" + token,
+                "gotify",
+                data=body,
+                content_type="application/json",
+            )
+
+    @staticmethod
+    def _http(url: str, label: str, data: bytes | None = None, content_type: str | None = None) -> None:
+        request = urllib.request.Request(url, data=data)
+        if content_type:
+            request.add_header("Content-Type", content_type)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                response.read()
+        except Exception as exc:  # noqa: BLE001 - notification must never fail the run
+            print(f"  warning: {label} failed: {exc}")
+
+    def _unit_dir(self) -> Path:
+        return Path("/etc/systemd/system")
+
+    def _snapshot_install(self, conf: dict) -> int:
+        if not self.sh.dry_run and os.geteuid() != 0:
+            raise HomelabError("snapshot install writes systemd units; run it as root")
+        schedule = conf.get("schedule", "*-*-* 02:30:00")
+        script = Path("/usr/local/bin/homelab")
+        service = f"""[Unit]
+Description=homelab snapshot
+
+[Service]
+Type=oneshot
+ExecStart={script} --root {self.root} snapshot run
+"""
+        timer = f"""[Unit]
+Description=homelab snapshot timer
+
+[Timer]
+OnCalendar={schedule}
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+"""
+        unit_dir = self._unit_dir()
+        (unit_dir / "homelab-snapshot.service").write_text(service)
+        (unit_dir / "homelab-snapshot.timer").write_text(timer)
+        self.sh.run(["systemctl", "daemon-reload"])
+        self.sh.run(["systemctl", "enable", "--now", "homelab-snapshot.timer"])
+        print(f"installed homelab-snapshot.timer ({schedule})")
+        return 0
+
+    def _snapshot_uninstall(self, conf: dict) -> int:
+        self.sh.run(["systemctl", "disable", "--now", "homelab-snapshot.timer"], check=False)
+        for name in ("homelab-snapshot.service", "homelab-snapshot.timer"):
+            path = self._unit_dir() / name
+            if path.is_file():
+                path.unlink()
+        self.sh.run(["systemctl", "daemon-reload"], check=False)
+        print("removed homelab-snapshot units")
+        return 0
+
+    # -- provision --------------------------------------------------------
+    def cmd_migrate(self) -> int:
+        if self.args.what != "data":
+            raise HomelabError("only `migrate data` is implemented")
+        return self._migrate_data()
+
+    def _migrate_data(self) -> int:
+        raw = self.args.to or self.conf.get("general", {}).get("data_dir")
+        if not raw:
+            raise HomelabError(
+                "no destination: pass --to DIR or set [general] data_dir in homelab.toml"
+            )
+        target_root = Path(raw).expanduser()
+        if self.args.apply and not shutil.which("rsync"):
+            raise HomelabError("rsync is not installed; `apt install rsync` first")
+        remote, remote_root = "", ""
+        if self.args.source:
+            remote, _, remote_root = self.args.source.partition(":")
+            remote_root = remote_root.rstrip("/")
+            if not remote or not remote_root:
+                raise HomelabError("--from takes HOST:/path/to/checkout")
+        moves = []
+        skipped = []
+        for name in self.selected(self.args.services):
+            svc_dir = self.dirs[name]
+            if "DATA_DIR" not in compose_text(svc_dir):
+                skipped.append(name)
+                continue
+            # with --from the remote checkout is the source of truth, so ignore local .env
+            env = {} if remote else read_env(svc_dir / ENV_FILE)
+            for source, _container in bind_sources(svc_dir, env):
+                if remote:
+                    try:
+                        relative = source.relative_to(self.root.resolve())
+                    except ValueError:
+                        raise HomelabError(
+                            f"{name} binds {source}, which is outside the checkout; "
+                            "copy it by hand"
+                        ) from None
+                    spec = f"{remote}:{remote_root}/{relative.as_posix()}/"
+                else:
+                    if target_root in source.parents:
+                        print(f"  {name}: {source} already under {target_root}")
+                        continue
+                    if not source.is_dir():
+                        continue
+                    spec = f"{source}/"
+                moves.append((name, spec, target_root / name / source.name))
+        if skipped:
+            print(
+                f"  leaving {', '.join(skipped)} alone: their compose files do not use "
+                f"DATA_DIR, so a copy would not be picked up\n"
+            )
+        if not moves:
+            print(f"nothing to move: no service state outside {target_root}")
+            return 0
+        print(f"state to move into {target_root}:\n")
+        for name, spec, destination in moves:
+            print(f"  {name}: {spec}\n      -> {destination}")
+        if not self.args.apply:
+            print("\nthis was a plan; re-run with --apply to copy")
+            return 0
+        for name, spec, destination in moves:
+            destination.mkdir(parents=True, exist_ok=True)
+            self.sh.run(["rsync", "-a", "--numeric-ids", spec, f"{destination}/"])
+            diff = self.sh.run(
+                [
+                    "rsync", "-a", "--numeric-ids",
+                    "--dry-run", "--itemize-changes", spec, f"{destination}/",
+                ]
+            )
+            if diff.out.strip():
+                raise HomelabError(f"{spec} does not match its copy: {diff.out.strip()[:200]}")
+            print(f"  {name}: {destination} verified")
+        # the copy is inert unless the service points at it, so record it here
+        for name in sorted({move[0] for move in moves}):
+            env_path = self.dirs[name] / ENV_FILE
+            values = read_env(env_path)
+            values["DATA_DIR"] = str(target_root / name)
+            write_env(env_path, values)
+            print(f"  {name}: DATA_DIR={target_root / name}")
+        count = len(moves)
+        noun = "directory" if count == 1 else "directories"
+        print(f"\ncopied and verified {count} state {noun}; restart with `homelab up`")
+        return 0
+
+    def cmd_provision(self) -> int:
+        if self.args.target != "pi":
+            raise HomelabError(
+                "only `provision pi` is implemented here; the proxmox steps are "
+                "documented in docs/PLAN.md"
+            )
+        provisioner = PiProvisioner(self)
+        return provisioner.run()
+
+    # -- install ----------------------------------------------------------
+    def cmd_install(self) -> int:
+        prefix = Path(self.args.prefix)
+        target = prefix / "homelab"
+        source = self.root / "bin" / "homelab"
+        prefix.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        os.symlink(source, target)
+        print(f"linked {target} -> {source}")
+        completion = self.root / "completions" / "homelab.bash"
+        completion_dir = Path("/etc/bash_completion.d")
+        if completion.is_file() and completion_dir.is_dir() and not self.args.no_completion:
+            destination = completion_dir / "homelab"
+            destination.write_text(completion.read_text())
+            print(f"installed completion {destination}")
+        print("try: homelab doctor")
+        return 0
+
+    def cmd_uninstall(self) -> int:
+        target = Path(self.args.prefix) / "homelab"
+        if target.is_symlink() or target.exists():
+            target.unlink()
+            print(f"removed {target}")
+        return 0
+
+
+# ------------------------------------------------------------------ provision
+
+
+def validate_pi_devices(devices, sh: Shell) -> list:
+    """Problems that make it unsafe to put these devices into a new array."""
+    problems = []
+    root_source = sh.probe(["findmnt", "-no", "SOURCE", "/"]).out.strip()
+    root_real = os.path.realpath(root_source) if root_source else ""
+    for dev in devices:
+        if not sh.probe(["test", "-b", dev]).ok:
+            problems.append(f"{dev}: not a block device")
+            continue
+        if os.path.realpath(dev) == root_real:
+            problems.append(f"{dev}: this holds the running root filesystem")
+        mounted = sh.probe(["lsblk", "-no", "MOUNTPOINT", dev]).out.strip()
+        if mounted:
+            problems.append(f"{dev}: mounted at {mounted}")
+        signature = sh.probe(
+            ["blkid", "-p", "-o", "value", "-s", "TYPE", dev]
+        ).out.strip()
+        if signature:
+            problems.append(
+                f"{dev}: still holds a {signature} signature "
+                f"(wipe it yourself with `wipefs -a {dev}`)"
+            )
+    return problems
+
+
+class PiProvisioner:
+    """Build the mirrored LVM repo on the Pi. Never wipes anything by itself."""
+
+    def __init__(self, app: "App") -> None:
+        self.app = app
+        self.args = app.args
+        self.sh = app.sh
+        conf = (app.conf.get("provision") or {}).get("pi") or {}
+        self.devices = list(conf.get("devices") or [])
+        self.md = conf.get("md_device", "/dev/md/repo")
+        self.vg = conf.get("vg", "vg_repo")
+        self.lv = conf.get("lv", "lv_repo")
+        self.mount = conf.get("mount", "/srv/repo")
+        self.label = conf.get("label", "repo")
+
+    @property
+    def logical(self) -> str:
+        return f"/dev/{self.vg}/{self.lv}"
+
+    def steps(self) -> list:
+        first, second = (self.devices + ["", ""])[:2]
+        return [
+            {
+                "what": f"mirror {first} + {second} into {self.md}",
+                "probe": ["test", "-b", self.md],
+                "cmd": [
+                    "mdadm", "--create", self.md,
+                    "--level=1", "--raid-devices=2", first, second,
+                ],
+            },
+            {
+                "what": f"volume group {self.vg} on {self.md}",
+                "probe": ["vgs", self.vg],
+                "cmd": ["vgcreate", self.vg, self.md],
+            },
+            {
+                "what": f"logical volume {self.lv} using all free extents",
+                "probe": ["lvs", self.logical],
+                "cmd": ["lvcreate", "-l", "100%FREE", "-n", self.lv, self.vg],
+            },
+            {
+                "what": f"ext4 on {self.logical} labelled {self.label}",
+                "probe": ["blkid", "-o", "value", "-s", "TYPE", self.logical],
+                "cmd": ["mkfs.ext4", "-m", "1", "-L", self.label, self.logical],
+            },
+            {
+                "what": f"mount point {self.mount}",
+                "probe": ["test", "-d", self.mount],
+                "cmd": ["mkdir", "-p", self.mount],
+            },
+            {
+                "what": f"persist {self.mount} in /etc/fstab",
+                "probe": None,
+                "fn": self._ensure_fstab,
+            },
+            {
+                "what": f"mount {self.logical} at {self.mount}",
+                "probe": ["findmnt", "-no", "TARGET", self.mount],
+                "cmd": ["mount", self.logical, self.mount],
+            },
+        ]
+
+    def _ensure_fstab(self) -> str:
+        entry = Path("/etc/fstab")
+        existing = entry.read_text() if entry.is_file() else ""
+        if self.mount in existing:
+            return f"fstab already mounts {self.mount}"
+        if self.sh.dry_run:
+            return (
+                f"would append `UUID=<uuid of {self.logical}> "
+                f"{self.mount} ext4 defaults,noatime 0 2`"
+            )
+        uuid = self.sh.probe(
+            ["blkid", "-o", "value", "-s", "UUID", self.logical]
+        ).out.strip()
+        if not uuid:
+            raise HomelabError(f"cannot read the UUID of {self.logical}")
+        line = f"UUID={uuid} {self.mount} ext4 defaults,noatime 0 2"
+        with entry.open("a") as handle:
+            handle.write(f"\n# homelab snapshot repo\n{line}\n")
+        return f"appended to /etc/fstab: {line}"
+
+    def _done(self, step: dict) -> bool:
+        probe = step.get("probe")
+        if not probe:
+            return False
+        return self.sh.probe(probe).ok
+
+    def run(self) -> int:
+        if len(self.devices) != 2:
+            raise HomelabError(
+                'set [provision.pi] devices = ["/dev/disk/by-id/...", "..."] in homelab.toml'
+            )
+        problems = validate_pi_devices(self.devices, self.sh)
+        plan = self.steps()
+        print(f"target mount: {self.mount}   array: {self.md}   vg: {self.vg}\n")
+        for index, step in enumerate(plan, 1):
+            state = "skip" if self._done(step) else "run "
+            detail = " ".join(step["cmd"]) if step.get("cmd") else "edit /etc/fstab"
+            print(f"  {index}. [{state}] {step['what']}\n            {detail}")
+        if problems:
+            print("\nrefusing to touch these devices:")
+            for problem in problems:
+                print(f"  - {problem}")
+            return 1
+        if not self.args.apply:
+            print("\ndry run; re-run with --apply to execute")
+            return 0
+        if os.geteuid() != 0:
+            raise HomelabError("provisioning needs root")
+        if not self.args.yes:
+            answer = input(
+                f"\nThis creates {self.md} from {', '.join(self.devices)}. Type 'yes': "
+            )
+            if answer.strip() != "yes":
+                raise HomelabError("aborted")
+        for step in plan:
+            if self._done(step):
+                print(f"  skip {step['what']}")
+                continue
+            print(f"  run  {step['what']}")
+            if step.get("fn"):
+                print(f"       {step['fn']()}")
+            else:
+                self.sh.run(step["cmd"], capture=False)
+        print(
+            "\nnext: `homelab snapshot install` for the timer, then `homelab doctor`"
+        )
+        return 0
+
+
+# --------------------------------------------------------------------- backends
+
+
+class ResticCli:
+    def __init__(self, shell: Shell, conf: dict) -> None:
+        self.sh = shell
+        self.conf = conf
+        self.base = ["restic", "--repo", conf["repo"]]
+        if conf.get("password_file"):
+            self.base += ["--password-file", conf["password_file"]]
+
+    def create(self, source: str, exclude) -> None:
+        args = [*self.base, "snapshot", source, "--tag", "homelab"]
+        for pattern in exclude:
+            args += ["--exclude", pattern]
+        self.sh.run(args, capture=False)
+
+    def forget(self, daily: int, weekly: int, monthly: int) -> None:
+        self.forget_at(self.conf["repo"], self.conf.get("password_file"), daily, weekly, monthly)
+
+    def forget_at(self, repo: str, password_file, daily: int, weekly: int, monthly: int) -> None:
+        args = ["restic", "--repo", repo]
+        if password_file:
+            args += ["--password-file", password_file]
+        args += [
+            "forget",
+            "--keep-daily", str(daily),
+            "--keep-weekly", str(weekly),
+            "--keep-monthly", str(monthly),
+            "--prune",
+        ]
+        self.sh.run(args, capture=False)
+
+    def copy_to(self, dest: str, dest_password_file, limit_upload=None) -> None:
+        args = [*self.base, "copy", "--repo2", dest]
+        if dest_password_file:
+            args += ["--password-file2", dest_password_file]
+        if limit_upload:
+            args += ["--limit-upload", str(limit_upload)]
+        self.sh.run(args, capture=False)
+
+    def check(self, subset: str, full: bool = False) -> None:
+        args = [*self.base, "check"]
+        if not full:
+            args.append("--read-data-subset=" + subset)
+        self.sh.run(args, capture=False)
+
+    def snapshots(self) -> None:
+        self.sh.run([*self.base, "snapshots"], capture=False)
+
+    def stats(self) -> None:
+        self.sh.run([*self.base, "stats", "--mode", "raw-data"], capture=False)
+
+    def extract(self, snapshot: str, target: str, include) -> None:
+        args = [*self.base, "restore", snapshot, "--target", target]
+        if include:
+            args += ["--include", include]
+        self.sh.run(args, capture=False)
+
+
+class BorgCli:
+    def __init__(self, shell: Shell, conf: dict) -> None:
+        self.sh = shell
+        self.conf = conf
+        self.repo = conf["repo"]
+
+    def _env(self):
+        env = os.environ.copy()
+        if self.conf.get("passphrase_file"):
+            env["BORG_PASSCOMMAND"] = f"cat {self.conf['passphrase_file']}"
+        return env
+
+    def create(self, source: str, exclude) -> None:
+        name = time.strftime("homelab-%Y-%m-%dT%H:%M:%S")
+        args = ["borg", "create", "--stats", "--compression", "zstd,3", f"{self.repo}::{name}", source]
+        for pattern in exclude:
+            args += ["--exclude", pattern]
+        self.sh.run(args, capture=False, env=self._env())
+
+    def forget(self, daily: int, weekly: int, monthly: int) -> None:
+        self.forget_at(self.repo, None, daily, weekly, monthly)
+
+    def forget_at(self, repo: str, password_file, daily: int, weekly: int, monthly: int) -> None:
+        self.sh.run(
+            [
+                "borg", "prune", "--list",
+                "--keep-daily", str(daily),
+                "--keep-weekly", str(weekly),
+                "--keep-monthly", str(monthly),
+                repo,
+            ],
+            capture=False,
+            env=self._env(),
+        )
+
+    def copy_to(self, dest: str, dest_password_file, limit_upload=None) -> None:
+        raise HomelabError(
+            "borg cannot copy between repositories (that is borg 2 `transfer`); "
+            "use restic for the replicated topology, or run a second `borg create`"
+        )
+
+    def check(self, subset: str, full: bool = False) -> None:
+        args = ["borg", "check"]
+        if not full:
+            args += ["--verify-data", "--last", "3"]
+        args.append(self.repo)
+        self.sh.run(args, capture=False, env=self._env())
+
+    def snapshots(self) -> None:
+        self.sh.run(["borg", "list", self.repo], capture=False, env=self._env())
+
+    def stats(self) -> None:
+        self.sh.run(["borg", "info", self.repo], capture=False, env=self._env())
+
+    def extract(self, snapshot: str, target: str, include) -> None:
+        args = ["borg", "extract", f"{self.repo}::{snapshot}"]
+        if include:
+            args.append(include)
+        self.sh.run(args, capture=False, env=self._env(), cwd=target)
+
+
+# ------------------------------------------------------------------------ main
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="homelab",
+        description="run, inspect, verify and snapshot the homelab docker stack",
+    )
+    parser.add_argument("--root", help="path to the homelab checkout")
+    parser.add_argument("--host", help="only this host's services (see [hosts] in homelab.toml)")
+    parser.add_argument("--conf", help="path to homelab.toml")
+    parser.add_argument("--verbose", action="store_true", help="echo every command")
+    parser.add_argument("--version", action="version", version=f"homelab {VERSION}")
+    subs = parser.add_subparsers(dest="command", required=True)
+
+    up = subs.add_parser("up", help="start services in dependency order")
+    up.add_argument("services", nargs="*")
+    up.add_argument("--proxy", help="reverse proxy to start")
+    up.add_argument(
+        "--profile", action="append", help="enable this compose profile (repeatable)"
+    )
+    up.add_argument("--no-wait", action="store_true", help="do not wait for health")
+    up.add_argument("--wait", type=int, default=90, help="seconds to wait (default 90)")
+    up.add_argument("--allow-port-conflict", action="store_true")
+    up.add_argument("--dry-run", action="store_true")
+
+    down = subs.add_parser("down", help="stop services in reverse order")
+    down.add_argument("services", nargs="*")
+    down.add_argument("--dry-run", action="store_true")
+
+    restart = subs.add_parser("restart", help="stop then start")
+    restart.add_argument("services", nargs="*")
+    restart.add_argument("--proxy")
+    restart.add_argument("--wait", type=int, default=90)
+    restart.add_argument("--allow-port-conflict", action="store_true")
+    restart.add_argument("--dry-run", action="store_true")
+
+    status = subs.add_parser("status", help="show container state, health and URL")
+    status.add_argument("--json", action="store_true")
+
+    urls = subs.add_parser("urls", help="print service URLs from each .env")
+
+    logs = subs.add_parser("logs", help="follow a service log")
+    logs.add_argument("service")
+    logs.add_argument("-f", "--follow", action="store_true")
+    logs.add_argument("-n", "--tail", type=int, default=100)
+
+    config = subs.add_parser("config", help="create/refresh service .env files")
+    config.add_argument("--reconfigure", action="store_true", help="ask about every key")
+    config.add_argument("--non-interactive", action="store_true", help="fill secrets, no prompts")
+
+    doctor = subs.add_parser("doctor", help="preflight checks")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--strict", action="store_true", help="fail on warnings too")
+
+    snapshot = subs.add_parser("snapshot", help="snapshot the stack (restic or borg)")
+    snapshot.add_argument(
+        "action",
+        choices=[
+            "run", "list", "verify", "extract", "stats", "copy", "install", "uninstall",
+        ],
+    )
+    snapshot.add_argument("snapshot", nargs="?", help="snapshot id for extract")
+    snapshot.add_argument("target", nargs="?", help="target dir for extract", default=".")
+    snapshot.add_argument("--include", help="path filter for extract")
+    snapshot.add_argument("--full", action="store_true", help="verify reads all data")
+    snapshot.add_argument("--no-check", action="store_true", help="skip post-run verify")
+    snapshot.add_argument("--remote", help="run pre-hooks over ssh on this host")
+    snapshot.add_argument(
+        "--only", action="append", help="limit `copy` to this target name"
+    )
+    snapshot.add_argument("--dry-run", action="store_true")
+
+    migrate = subs.add_parser("migrate", help="move container state out of the git tree")
+    migrate.add_argument("what", choices=["data"])
+    migrate.add_argument("services", nargs="*", help="only these services")
+    migrate.add_argument("--to", help="destination root (default: [general] data_dir)")
+    migrate.add_argument(
+        "--from", dest="source", metavar="HOST:ROOT",
+        help="copy from that host's checkout instead of this one",
+    )
+    migrate.add_argument("--apply", action="store_true", help="copy, do not just print")
+    migrate.add_argument("--dry-run", action="store_true")
+
+    provision = subs.add_parser("provision", help="bootstrap a host (pi mirror + repo)")
+    provision.add_argument("target", choices=["pi"])
+    provision.add_argument("--apply", action="store_true", help="execute, not just print")
+    provision.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    provision.add_argument("--dry-run", action="store_true")
+
+    install = subs.add_parser("install", help="symlink the CLI into PATH")
+    install.add_argument("--prefix", default="/usr/local/bin")
+    install.add_argument("--no-completion", action="store_true")
+
+    uninstall = subs.add_parser("uninstall", help="remove the symlink")
+    uninstall.add_argument("--prefix", default="/usr/local/bin")
+    return parser
+
+
+COMMANDS = {
+    "up": "cmd_up",
+    "down": "cmd_down",
+    "restart": "cmd_restart",
+    "status": "cmd_status",
+    "urls": "cmd_urls",
+    "logs": "cmd_logs",
+    "config": "cmd_config",
+    "doctor": "cmd_doctor",
+    "snapshot": "cmd_snapshot",
+    "migrate": "cmd_migrate",
+    "provision": "cmd_provision",
+    "install": "cmd_install",
+    "uninstall": "cmd_uninstall",
+}
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "json"):
+        args.json = False
+    try:
+        app = App(args)
+        return getattr(app, COMMANDS[args.command])()
+    except HomelabError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

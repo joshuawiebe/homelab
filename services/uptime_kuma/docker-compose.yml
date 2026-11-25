@@ -1,18 +1,27 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   uptime_kuma:
-    image: louislam/uptime-kuma:latest
+    image: ${UPTIME_KUMA_IMAGE:-louislam/uptime-kuma:latest}
+    logging: *default-logging
     container_name: uptime_kuma
     hostname: uptime_kuma
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-.}/data:/app/data
     networks:
       - proxy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.uptime_kuma.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.uptime_kuma.entrypoints=websecure"
-      - "traefik.http.routers.uptime_kuma.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.uptime_kuma.middlewares=security-headers@docker"
+      - "traefik.http.routers.uptime_kuma.tls.certresolver=dns"
       - "traefik.http.routers.uptime_kuma.tls.domains[0].main=${DOMAIN}"
 
 networks:

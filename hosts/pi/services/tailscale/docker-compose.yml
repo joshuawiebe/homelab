@@ -1,0 +1,33 @@
+# Optional: reach the NUC and its services from anywhere without publishing them.
+#   docker compose --profile vpn up -d
+# then approve the advertised route in the Tailscale admin console.
+# `--accept-dns=false` keeps AdGuard as the only resolver on this host.
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
+services:
+  tailscale:
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:latest}
+    logging: *default-logging
+    container_name: tailscale
+    hostname: pi
+    restart: unless-stopped
+    profiles: ["vpn"]
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ${DATA_DIR:-/srv/homelab}/tailscale:/var/lib/tailscale
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_AUTH_ONCE=true
+      - TS_EXTRA_ARGS=--advertise-routes=${LAN_CIDR:-192.168.1.0/24} --accept-dns=false

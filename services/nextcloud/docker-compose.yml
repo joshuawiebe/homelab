@@ -1,40 +1,55 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   nextcloud:
-    image: nextcloud
+    image: ${NEXTCLOUD_IMAGE:-nextcloud}
+    logging: *default-logging
     container_name: nextcloud
     hostname: nextcloud
     restart: always
     volumes:
-      - ./nextcloud:/var/www/html
+      - ${DATA_DIR:-.}/nextcloud:/var/www/html
     environment:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=nextcloud
       - MYSQL_USER=nextcloud
       - MYSQL_HOST=db
       - PHP_OPCACHE_MEMORY_CONSUMPTION=256
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-172.16.0.0/12}
+      - OVERWRITEPROTOCOL=https
+      - OVERWRITEHOST=${DOMAIN}
+      - APACHE_DISABLE_REWRITE_IP=1
     networks:
       - proxy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.nextcloud.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.nextcloud.entrypoints=websecure"
-      - "traefik.http.routers.nextcloud.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.nextcloud.tls.certresolver=dns"
       - "traefik.http.routers.nextcloud.tls.domains[0].main=${DOMAIN}"
       - "traefik.http.middlewares.nextcloud-headers.headers.STSSeconds=31536000"
       - "traefik.http.middlewares.nextcloud-headers.headers.STSIncludeSubdomains=true"
       - "traefik.http.middlewares.nextcloud-headers.headers.STSPreload=true"
-      - "traefik.http.routers.nextcloud.middlewares=nextcloud-headers@docker"
+      - "traefik.http.routers.nextcloud.middlewares=nextcloud-headers@docker,security-headers@docker,ratelimit@docker"
     depends_on:
-      - redis
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   cron:
-    image: nextcloud
+    image: ${NEXTCLOUD_IMAGE:-nextcloud}
+    logging: *default-logging
     container_name: nextcloud_cron
     hostname: nextcloud_cron
     restart: always
     volumes:
-      - ./nextcloud:/var/www/html
+      - ${DATA_DIR:-.}/nextcloud:/var/www/html
     entrypoint: /cron.sh
     depends_on:
       - nextcloud
@@ -42,13 +57,20 @@ services:
       - proxy
 
   db:
-    image: mariadb:10.11
+    image: ${MARIADB_IMAGE:-mariadb:10.11}
+    logging: *default-logging
     container_name: db
     hostname: db
     restart: always
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     command: --transaction-isolation=READ-COMMITTED
     volumes:
-      - ./db:/var/lib/mysql
+      - ${DATA_DIR:-.}/db:/var/lib/mysql
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
@@ -58,10 +80,16 @@ services:
       - proxy
 
   redis:
-    image: redis:alpine
+    image: ${REDIS_IMAGE:-redis:alpine}
+    logging: *default-logging
     container_name: redis
     hostname: redis
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
     networks:
       - proxy
 

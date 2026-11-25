@@ -1,11 +1,19 @@
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 services:
   gotify:
-    image: gotify/server:latest
+    image: ${GOTIFY_IMAGE:-gotify/server:latest}
+    logging: *default-logging
     container_name: gotify
     hostname: gotify
     restart: unless-stopped
     volumes:
-      - ./data:/app/data
+      - ${DATA_DIR:-.}/data:/app/data
     environment:
       - TZ=Europe/Berlin
     networks:
@@ -14,7 +22,8 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.gotify.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.gotify.entrypoints=websecure"
-      - "traefik.http.routers.gotify.tls.certresolver=dnsresolver"
+      - "traefik.http.routers.gotify.middlewares=security-headers@docker"
+      - "traefik.http.routers.gotify.tls.certresolver=dns"
       - "traefik.http.routers.gotify.tls.domains[0].main=${DOMAIN}"
 
 networks:

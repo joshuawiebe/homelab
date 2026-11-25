@@ -1,0 +1,22 @@
+# Pi variant of Gotify: LAN only, no TLS. Point the snapshot hooks and Uptime Kuma
+# notifications at http://<pi>:8080.
+# every container writes json-file logs; without a cap they grow until the disk is full
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "2"
+
+services:
+  gotify:
+    image: ${GOTIFY_IMAGE:-gotify/server:latest}
+    logging: *default-logging
+    container_name: gotify
+    hostname: gotify
+    restart: unless-stopped
+    ports:
+      - "${PI_BIND_ADDR:-0.0.0.0}:8080:80"
+    volumes:
+      - ${DATA_DIR:-/srv/homelab}/gotify:/app/data
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
