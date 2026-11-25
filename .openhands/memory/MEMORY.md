@@ -6,7 +6,7 @@
 - `bin/homelab` is the single entry point: a ~1200-line, stdlib-only Python 3.11+ CLI
   (up/down/restart/status/logs/urls/config/doctor/snapshot/provision/install).
   `.automations/*.sh` are 3-line shims; `auto_backup/` was deleted as superseded.
-- Tests: `python3 -m unittest discover -s tests` — 65 tests, no docker daemon needed.
+- Tests: `python3 -m unittest discover -s tests` — 72 tests, no docker daemon needed.
 - Two hosts, one CLI: `[hosts.nuc]` / `[hosts.pi]` in `homelab.toml`, Pi stack under
   `hosts/pi/services/`. `--host NAME` filters; `HOMELAB_CONF` swaps the whole config.
 - `docs/PLAN.md` is the topology + runbook (Proxmox VM, md/LVM repo, restic copies).
@@ -54,3 +54,13 @@
   Cutover order lives in `docs/PLAN.md` phase 0.
 - rsync is NOT installed in the agent container (no root), so the migrate apply test uses a
   stub `rsync` shell script on PATH that does `cp -a "${src}." "$dst"`.
+
+## User's actual Pi layout (confirmed)
+- Repo AND all service data on the SSD; OS + `/var/lib/docker` on the microSD.
+- Therefore: `git clean -xfd` on the Pi is destructive; do not copy data within the Pi (one
+  disk, would double usage); pull straight to the NUC with
+  `migrate data --from pi.lan:/opt/homelab --to /srv/homelab --apply`.
+- `.env` files are gitignored, so they must be carried separately BEFORE `homelab config`,
+  otherwise a fresh MYSQL_PASSWORD no longer matches the existing Nextcloud database.
+- Doctor now checks named volumes (state in docker's root = the card) and log caps; all
+  compose files carry an `x-logging` anchor (10m x 2).
