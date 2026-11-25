@@ -842,6 +842,53 @@ services:
         self.assertEqual(checks["log limits"]["status"], "OK")
 
 
+class AcmeStorageTests(unittest.TestCase):
+    COMPOSE = """services:
+  edge:
+    image: ${PROXY_IMAGE:-traefik:latest}
+    ports:
+      - "443:443"
+    labels:
+      - "traefik.http.routers.dash.tls.certresolver=dns"
+    command:
+      - "--certificatesresolvers.dns.acme.dnschallenge=true"
+      - "--certificatesresolvers.dns.acme.dnschallenge.provider=ipv64"
+      - "--certificatesresolvers.dns.acme.storage=/letsencrypt/acme.json"
+    environment:
+      - IPV64_API_KEY=${IPV64_API_KEY}
+    volumes:
+      - ./letsencrypt:/letsencrypt
+"""
+
+    def setUp(self):
+        self.repo = TempRepo({"edge": self.COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        self.repo.add_env("edge", {"PROXY_IMAGE": "traefik:v3.5", "IPV64_API_KEY": "k"})
+        self.acme = self.repo.dir / "services" / "edge" / "letsencrypt" / "acme.json"
+
+    def checks(self):
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        return {c["name"]: c for c in __import__("json").loads(out)}
+
+    def write(self, mode):
+        self.acme.parent.mkdir(parents=True, exist_ok=True)
+        self.acme.write_text("{}")
+        self.acme.chmod(mode)
+
+    def test_world_readable_acme_json_is_a_failure(self):
+        self.write(0o644)
+        self.assertEqual(self.checks()["acme storage"]["status"], "FAIL")
+
+    def test_600_acme_json_passes(self):
+        self.write(0o600)
+        self.assertEqual(self.checks()["acme storage"]["status"], "OK")
+
+    def test_missing_acme_json_is_a_warning(self):
+        check = self.checks()["acme storage"]
+        self.assertEqual(check["status"], "WARN")
+        self.assertIn("install -m 600", check["hint"])
+
+
 class MigrateScopeTests(unittest.TestCase):
     def setUp(self):
         self.repo = TempRepo(

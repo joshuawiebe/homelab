@@ -19,6 +19,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -731,6 +732,7 @@ class App:
         add(self._check_ports())
         add(self._check_floating_tags())
         add(self._check_socket_mounts())
+        add(self._check_acme_storage())
         add(self._check_data_in_tree())
         add(self._check_named_volumes())
         add(self._check_log_limits())
@@ -1052,6 +1054,41 @@ class App:
                     self._check(f"copy {name}", "OK", f"newest {age / 24:.1f} days old")
                 )
         return checks
+
+    def _check_acme_storage(self) -> dict:
+        proxy = self.proxy
+        if not proxy:
+            return self._check("acme storage", "SKIP", "this host runs no reverse proxy")
+        text = compose_text(self.dirs[proxy])
+        match = re.search(r"acme\.storage=([^\s\"']+)", text)
+        if not match:
+            return self._check("acme storage", "SKIP", "no acme.storage configured")
+        wanted = match.group(1)
+        env = read_env(self.dirs[proxy] / ENV_FILE)
+        for host, container in bind_sources(self.dirs[proxy], env):
+            base = container.rstrip("/")
+            if wanted == base or wanted.startswith(base + "/"):
+                relative = wanted[len(base):].lstrip("/")
+                path = host / relative if relative else host
+                break
+        else:
+            return self._check(
+                "acme storage", "WARN", f"{wanted} is not inside a bind mount",
+                "traefik cannot write it and will fail the first challenge",
+            )
+        if not path.exists():
+            return self._check(
+                "acme storage", "WARN", f"{path} does not exist yet",
+                "pre-create it with `install -m 600 /dev/null <path>`; traefik refuses "
+                "to start when this file is not 600",
+            )
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode != 0o600:
+            return self._check(
+                "acme storage", "FAIL", f"{path} is {mode:03o}",
+                "traefik refuses to start with an acme.json that is not 600: chmod 600 it",
+            )
+        return self._check("acme storage", "OK", f"{path} is 600")
 
     def _check_named_volumes(self) -> dict:
         offenders = []

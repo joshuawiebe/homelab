@@ -82,7 +82,13 @@ without copying a terabyte.
   better answer**: `hosts/pi/services/tailscale/` exists for that, and advertising the LAN
   route gives you everything without opening a port.
 * The DNS-01 challenge keeps working as long as the `ipv64` token stays in
-  `services/traefik/.env`. It never needs to leave the NUC.
+  `services/traefik/.env`. It never needs to leave the NUC, and it needs no inbound port:
+  lego writes the `_acme-challenge` TXT record through the ipv64 API (provider `ipv64`,
+  env `IPV64_API_KEY`, supported since lego v4.13, so any Traefik v3 image has it).
+* Both boxes sit behind the same router, so the `ipv64` A record resolves to the same WAN
+  address for either of them. The cutover therefore moves **one port forward**, not a DNS
+  record, and the DynDNS updater can keep running where it already runs - it tracks the WAN
+  address, not a machine.
 
 ## 4. Who holds which secret
 
@@ -136,15 +142,19 @@ Your layout today: **the repo and every service's data are on the SSD**, the OS 
    ```
 
    Do this **before** `homelab config`. If `config` generates fresh secrets, the Nextcloud
-   database and its `MYSQL_PASSWORD` no longer match and the app refuses to start. Add
-   `--include='letsencrypt'` if you also want the existing certificates; otherwise Let's
-   Encrypt re-issues them, which is fine once.
+   database and its `MYSQL_PASSWORD` no longer match and the app refuses to start.
+
+   Also copy `--include='letsencrypt'` (the ACME state). Without it Traefik re-issues every
+   certificate, and Let's Encrypt allows five duplicate certificates per week - a couple of
+   cutover retries can exhaust that. Keep the file at mode 600: Traefik refuses to start if
+   `acme.json` is readable by anyone else, and `homelab doctor` now checks exactly that.
 4. **Start the NUC stack** (`homelab config`, `homelab doctor`, `homelab up`) and check the
    three things that always break: Nextcloud login, Vaultwarden login, AdGuard answering on
    53. `doctor` must say `data location: OK` and `named volumes: OK` - the second one means
    no state is hiding in `/var/lib/docker` (which on the Pi is the microSD).
-5. **Move DNS and the port forwards** to the NUC. Keep the Pi's AdGuard answering until the
-   NUC does.
+5. **Move the port forward** from the Pi to the NUC (the A record does not change: both
+   boxes are behind the same WAN address). Keep the Pi's AdGuard answering until the NUC
+   does. If you go Tailscale-only, there is nothing to move here.
 6. **Do not wipe anything for a week.** The Pi's in-tree data and the USB stick are your only
    copy until the new chain has produced and verified one.
 

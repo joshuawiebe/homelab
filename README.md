@@ -105,6 +105,7 @@ Ordered from "will not boot" to "smells":
 * host ports 80/443/53 free (`systemd-resolved` will hold 53)
 * image tags: `:latest` and untagged images are flagged
 * `docker.sock` mounted read-write (root-equivalent)
+* `acme.json` permissions: Traefik refuses to start unless it is mode 600
 * named volumes: state inside docker's data-root, which on a Pi is the microSD
 * unbounded `json-file` logs: they fill the disk and wear out an SD card
 * container state living inside the git tree
