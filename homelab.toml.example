@@ -26,6 +26,8 @@ services = ["adguard_home", "uptime_kuma", "gotify"]
 tool = "restic"                                  # restic | borg
 repo = "/srv/repo/restic"                        # local repo on the Pi (pull model)
 password_file = "/etc/homelab/restic.password"   # mode 600, root-only
+# One path, or a list of them. The Pi uses a list: the NUC's staging mount plus its own
+# data_dir, so the Pi's AdGuard, Kuma and Gotify state is in the same repository.
 source = "/srv/mnt/nuc/srv/homelab"              # staging mount of the NUC, or the local data_dir
 exclude = ["**/cache", "**/*.tmp", "**/logs"]
 keep_daily = 7
@@ -37,11 +39,16 @@ copy = false                                     # set true to run the copies af
 
 # Commands run before the snapshot (on the source host with --remote HOST).
 # These keep databases consistent without stopping the stack.
+# Dumps must land inside data_dir, otherwise they are written next to the snapshot instead
+# of inside it and are never backed up. `homelab doctor` checks this.
 pre = [
-  "docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/dumps/nextcloud.sql",
-  "sqlite3 /srv/homelab/vaultwarden/vw-data/db.sqlite3 '.backup /srv/dumps/vaultwarden.sqlite'",
-  "sqlite3 /srv/homelab/uptime_kuma/data/kuma.db '.backup /srv/dumps/kuma.sqlite'",
+  "mkdir -p /srv/homelab/dumps && docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/homelab/dumps/nextcloud.sql",
+  "mkdir -p /srv/homelab/dumps && sqlite3 /srv/homelab/vw-data/db.sqlite3 '.backup /srv/homelab/dumps/vaultwarden.sqlite'",
 ]
+
+# Hooks that must run on this machine even when `snapshot run --remote` is used, because the
+# data is local here (the Pi's own services). Same syntax as `pre`.
+pre_local = []
 
 # Alerting. Both are optional; healthcheck_url is the important one (dead-man's switch).
 healthcheck_url = ""

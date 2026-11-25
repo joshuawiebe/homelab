@@ -22,8 +22,9 @@ label = "homelab-repo"
 tool = "restic"
 repo = "/srv/repo/restic"
 password_file = "/etc/homelab/restic.password"
-# staging mount of the NUC pulled over ssh (see docs/PLAN.md)
-source = "/srv/mnt/nuc/srv/homelab"
+# staging mount of the NUC pulled over ssh, plus the Pi's own data: AdGuard, Kuma and Gotify
+# live here, and a snapshot that only covers the NUC would quietly skip them.
+source = ["/srv/mnt/nuc/srv/homelab", "/srv/homelab"]
 exclude = ["**/cache", "**/*.tmp", "**/logs", "**/.cache"]
 keep_daily = 7
 keep_weekly = 4
@@ -35,12 +36,18 @@ healthcheck_url = ""
 gotify_url = "http://127.0.0.1:8080"
 gotify_token = ""
 
-# Run on the NUC with: homelab snapshot run --remote backups@nuc.lan
-# Consistent database dumps beat copying live files.
+# Run on the NUC with: homelab snapshot run --remote backup@homelab.lan
+# Consistent database dumps beat copying live files, and they must land inside data_dir:
+# a dump written to /srv/dumps sits next to the snapshot, not in it, and is never backed up.
 pre = [
-  "docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/dumps/nextcloud.sql",
-  "sqlite3 /srv/homelab/vaultwarden/vw-data/db.sqlite3 '.backup /srv/dumps/vaultwarden.sqlite'",
-  "sqlite3 /srv/homelab/uptime_kuma/data/kuma.db '.backup /srv/dumps/kuma.sqlite'",
+  "mkdir -p /srv/homelab/dumps && docker exec db sh -c 'exec mysqldump --single-transaction --quick --all-databases' > /srv/homelab/dumps/nextcloud.sql",
+  "mkdir -p /srv/homelab/dumps && sqlite3 /srv/homelab/vw-data/db.sqlite3 '.backup /srv/homelab/dumps/vaultwarden.sqlite'",
+]
+
+# The Pi's own databases: same layout, but they live here, so they are never dumped over ssh.
+pre_local = [
+  "mkdir -p /srv/homelab/dumps && sqlite3 /srv/homelab/uptime_kuma/kuma.db '.backup /srv/homelab/dumps/kuma.sqlite'",
+  "mkdir -p /srv/homelab/dumps && sqlite3 /srv/homelab/gotify/gotify.db '.backup /srv/homelab/dumps/gotify.sqlite'",
 ]
 
 # Second local copy on the spinning disk: a bad prune cannot take both.

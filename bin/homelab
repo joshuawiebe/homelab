@@ -738,6 +738,8 @@ class App:
         add(self._check_log_limits())
         add(self._check_disk())
         checks.extend(self._check_snapshots())
+        checks.append(self._check_hook_targets())
+        checks.append(self._check_secret_coverage())
 
         if self.args.json:
             print(json.dumps(checks, indent=2))
@@ -964,6 +966,55 @@ class App:
                 "a `git clean -xfd` deletes this; move it to /srv/homelab",
             )
         return self._check("data location", "OK", "no state in the git tree")
+
+    def _snapshot_roots(self, conf: dict) -> list[str]:
+        source = conf.get("source")
+        roots = [source] if isinstance(source, str) else list(source or [])
+        data_dir = self.conf.get("general", {}).get("data_dir")
+        if data_dir:
+            roots.append(data_dir)
+        return [str(Path(r).expanduser()).rstrip("/") for r in roots if r]
+
+    def _check_secret_coverage(self) -> dict:
+        env_files = [d / ENV_FILE for d in self.dirs.values() if (d / ENV_FILE).is_file()]
+        if not env_files:
+            return self._check("secret coverage", "SKIP", "no .env files yet")
+        roots = self._snapshot_roots(self.snapshot_conf())
+        if not roots:
+            return self._check("secret coverage", "SKIP", "no snapshot source configured")
+        root = str(self.root.resolve())
+        if any(root == r or root.startswith(r + "/") for r in roots):
+            return self._check(
+                "secret coverage", "OK", f"{len(env_files)} .env files are inside the snapshot"
+            )
+        return self._check(
+            "secret coverage", "WARN",
+            f"{len(env_files)} .env files live in the checkout, which no snapshot covers",
+            "add the checkout to [snapshot] source, or keep the .env files in your password manager",
+        )
+
+    def _check_hook_targets(self) -> dict:
+        conf = self.snapshot_conf()
+        hooks = list(conf.get("pre") or []) + list(conf.get("pre_local") or [])
+        if not hooks:
+            return self._check("snapshot hooks", "SKIP", "no pre-hooks configured")
+        roots = self._snapshot_roots(conf)
+        if not roots:
+            return self._check("snapshot hooks", "SKIP", "no snapshot source configured")
+        outside = set()
+        for hook in hooks:
+            for path in re.findall(r">>?\s*([^\s'\"]+)", hook):
+                if not path.startswith("/"):
+                    continue
+                if not any(path == root or path.startswith(root + "/") for root in roots):
+                    outside.add(path)
+        if outside:
+            return self._check(
+                "snapshot hooks", "WARN",
+                "writes outside the snapshot: " + ", ".join(sorted(outside)),
+                "dump into data_dir (e.g. /srv/homelab/dumps), or the dump is never backed up",
+            )
+        return self._check("snapshot hooks", "OK", f"{len(hooks)} hooks write inside the snapshot")
 
     def _snapshot_age_hours(self, repo: str, password_file) -> float | None:
         """Age of the newest snapshot in hours, or None if it cannot be probed."""
@@ -1229,6 +1280,9 @@ class App:
                 command = ["ssh", remote, hook] if remote else ["bash", "-lc", hook]
                 print(f"  hook: {hook}")
                 self.sh.run(command)
+            for hook in conf.get("pre_local", []):
+                print(f"  hook (local): {hook}")
+                self.sh.run(["bash", "-lc", hook])
             backend.create(conf.get("source") or "/", conf.get("exclude", []))
             backend.forget(
                 conf.get("keep_daily", 7),
@@ -1658,8 +1712,9 @@ class ResticCli:
         if conf.get("password_file"):
             self.base += ["--password-file", conf["password_file"]]
 
-    def create(self, source: str, exclude) -> None:
-        args = [*self.base, "snapshot", source, "--tag", "homelab"]
+    def create(self, source, exclude) -> None:
+        sources = [source] if isinstance(source, str) else [s for s in source if s]
+        args = [*self.base, "snapshot", *sources, "--tag", "homelab"]
         for pattern in exclude:
             args += ["--exclude", pattern]
         self.sh.run(args, capture=False)
@@ -1719,9 +1774,10 @@ class BorgCli:
             env["BORG_PASSCOMMAND"] = f"cat {self.conf['passphrase_file']}"
         return env
 
-    def create(self, source: str, exclude) -> None:
+    def create(self, source, exclude) -> None:
         name = time.strftime("homelab-%Y-%m-%dT%H:%M:%S")
-        args = ["borg", "create", "--stats", "--compression", "zstd,3", f"{self.repo}::{name}", source]
+        sources = [source] if isinstance(source, str) else [s for s in source if s]
+        args = ["borg", "create", "--stats", "--compression", "zstd,3", f"{self.repo}::{name}", *sources]
         for pattern in exclude:
             args += ["--exclude", pattern]
         self.sh.run(args, capture=False, env=self._env())

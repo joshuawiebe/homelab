@@ -6,7 +6,7 @@
 - `bin/homelab` is the single entry point: a ~1200-line, stdlib-only Python 3.11+ CLI
   (up/down/restart/status/logs/urls/config/doctor/snapshot/provision/install).
   `.automations/*.sh` are 3-line shims; `auto_backup/` was deleted as superseded.
-- Tests: `python3 -m unittest discover -s tests` — 72 tests, no docker daemon needed.
+- Tests: `python3 -m unittest discover -s tests` — 85 tests, no docker daemon needed.
 - Two hosts, one CLI: `[hosts.nuc]` / `[hosts.pi]` in `homelab.toml`, Pi stack under
   `hosts/pi/services/`. `--host NAME` filters; `HOMELAB_CONF` swaps the whole config.
 - `docs/PLAN.md` is the topology + runbook (Proxmox VM, md/LVM repo, restic copies).
@@ -64,3 +64,26 @@
   otherwise a fresh MYSQL_PASSWORD no longer matches the existing Nextcloud database.
 - Doctor now checks named volumes (state in docker's root = the card) and log caps; all
   compose files carry an `x-logging` anchor (10m x 2).
+
+## Release state (v1.0.0, Nov 2026)
+- `main` is the only branch; all work lands there via short-lived PR branches that get deleted.
+  `homelab --version` prints `VERSION` in `bin/homelab`; keep it equal to the newest git tag.
+- `CHANGELOG.md` is the release body source (Keep a Changelog shape, one section per tag).
+
+## Backup correctness rules (found the hard way, all doctor-checked)
+- A dump redirected outside `data_dir`/`source` is NOT in the snapshot: the run succeeds and
+  the file is missing. Hooks write to `/srv/homelab/dumps`, doctor warns otherwise
+  ("snapshot hooks").
+- `[snapshot] source` accepts a list. The Pi snapshots the NUC staging mount *and* its own
+  `/srv/homelab`, otherwise AdGuard/Kuma/Gotify are never backed up.
+- `pre` hooks run on the source host (`--remote` = over ssh); `pre_local` always runs locally.
+- `restic copy --repo2` refuses a destination that was never `restic init`ed, so
+  `homelab snapshot init` initialises main + every copy and generates one passphrase each.
+- `snapshot install` must pin `--conf`: systemd does not inherit `HOMELAB_CONF`, and the Pi's
+  config is `hosts/pi/homelab.toml`, not `<root>/homelab.toml`. Without it the timer fails
+  before it can send the dead-man's-switch ping.
+- `acme.json` must be 600 or Traefik refuses to start; `doctor` checks it. Copying
+  `letsencrypt/` between machines also avoids the 5-duplicate-certs/week limit.
+- lego has a native `ipv64` provider (since v4.13): `dnschallenge.provider=ipv64` +
+  `IPV64_API_KEY`, no inbound port needed. Both hosts share one WAN IP, so a cutover moves
+  the port forward, not the DNS record.

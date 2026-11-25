@@ -482,6 +482,81 @@ class SnapshotInitTests(unittest.TestCase):
         self.assertIn("OnCalendar=", out)
 
 
+class SnapshotSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+
+    def write(self, body):
+        (self.repo.dir / "homelab.toml").write_text(body)
+
+    def test_a_list_of_sources_is_snapshotted_in_one_run(self):
+        self.write(
+            '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
+            'source = ["/srv/mnt/nuc/srv/homelab", "/srv/homelab"]\n'
+        )
+        code, out, _ = run_cli(["--root", str(self.repo.dir), "snapshot", "run", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("snapshot /srv/mnt/nuc/srv/homelab /srv/homelab", out)
+
+    def test_local_hooks_run_here_even_with_remote(self):
+        self.write(
+            '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\nsource = "/srv/homelab"\n'
+            'pre = ["docker exec db true"]\npre_local = ["sqlite3 /x.db .backup /y.db"]\n'
+        )
+        code, out, _ = run_cli(
+            ["--root", str(self.repo.dir), "snapshot", "run", "--remote", "b@nuc", "--dry-run"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("$ ssh b@nuc 'docker exec db true'", out)
+        self.assertIn("$ bash -lc 'sqlite3 /x.db .backup /y.db'", out)
+
+    def test_doctor_warns_about_a_dump_outside_the_snapshot(self):
+        self.write(
+            '[general]\ndata_dir = "/srv/homelab"\n'
+            '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
+            'source = "/srv/homelab"\npre = ["pg_dump x > /srv/dumps/x.sql"]\n'
+        )
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["snapshot hooks"]["status"], "WARN")
+        self.assertIn("/srv/dumps/x.sql", checks["snapshot hooks"]["detail"])
+
+    def test_doctor_accepts_a_dump_inside_data_dir(self):
+        self.write(
+            '[general]\ndata_dir = "/srv/homelab"\n'
+            '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
+            'source = "/srv/mnt/nuc/srv/homelab"\n'
+            'pre = ["pg_dump x > /srv/homelab/dumps/x.sql"]\n'
+        )
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        checks = {c["name"]: c for c in __import__("json").loads(out)}
+        self.assertEqual(checks["snapshot hooks"]["status"], "OK")
+
+
+class SecretCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = TempRepo({"edge": PROXY_COMPOSE})
+        self.addCleanup(self.repo.cleanup)
+        self.repo.add_env("edge", {"PROXY_IMAGE": "traefik:v3.5"})
+
+    def check(self, source):
+        (self.repo.dir / "homelab.toml").write_text(
+            f'[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\nsource = "{source}"\n'
+        )
+        _, out, _ = run_cli(["--root", str(self.repo.dir), "doctor", "--json"])
+        return {c["name"]: c for c in __import__("json").loads(out)}["secret coverage"]
+
+    def test_env_files_outside_the_snapshot_are_flagged(self):
+        check = self.check("/srv/mnt/nuc/srv/homelab")
+        self.assertEqual(check["status"], "WARN")
+        self.assertIn("password manager", check["hint"])
+
+    def test_env_files_inside_the_snapshot_are_fine(self):
+        check = self.check(str(self.repo.dir))
+        self.assertEqual(check["status"], "OK")
+
+
 class CopyTests(unittest.TestCase):
     TOML = (
         '[snapshot]\ntool = "restic"\nrepo = "/srv/repo/restic"\n'
